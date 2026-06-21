@@ -29,6 +29,21 @@ def _stable_cal_id(remote_url: str, owner: str = "", account_id: str = "") -> st
     return _sync_id(remote_url, owner=owner, account_id=account_id)
 
 
+def _infer_event_tzid(ev: dict) -> str:
+    tzid = (ev.get("tzid") or "").strip()
+    if tzid:
+        return tzid
+    try:
+        from src.user_time import get_user_tz_name
+        tzid = (get_user_tz_name() or "").strip()
+        if tzid:
+            return tzid
+    except Exception:
+        pass
+    from src.caldav_sync import _infer_wall_clock_tz
+    return _infer_wall_clock_tz(ev.get("location") or "") or ""
+
+
 def build_event_ical(ev: dict) -> str:
     """Serialize a local event dict to a VCALENDAR/VEVENT iCalendar string.
 
@@ -53,9 +68,22 @@ def build_event_ical(ev: dict) -> str:
 
     dtstart = ev["dtstart"]
     dtend = ev["dtend"]
+    has_rrule = bool((ev.get("rrule") or "").strip())
+    tzid = _infer_event_tzid(ev) if (has_rrule and not ev.get("all_day")) else (ev.get("tzid") or "").strip()
     if ev.get("all_day"):
         ve.add("dtstart", dtstart.date())
         ve.add("dtend", dtend.date())
+    elif tzid:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tzid)
+        if ev.get("is_utc"):
+            start = dtstart.replace(tzinfo=timezone.utc).astimezone(tz)
+            end = dtend.replace(tzinfo=timezone.utc).astimezone(tz)
+        else:
+            start = dtstart.replace(tzinfo=tz)
+            end = dtend.replace(tzinfo=tz)
+        ve.add("dtstart", start)
+        ve.add("dtend", end)
     elif ev.get("is_utc"):
         # Stored as naive-UTC instants — re-attach UTC so the server gets a Z time.
         ve.add("dtstart", dtstart.replace(tzinfo=timezone.utc))
@@ -284,6 +312,16 @@ async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
             logger.warning("CalDAV write-back URL rejected: %s", e)
             return {"ok": False, "error": str(e)[:200]}
         acc_id = acc.get("id") or ""
+        if isinstance(ev, dict):
+            tzid = _infer_event_tzid(ev)
+            if tzid:
+                ev = {**ev, "tzid": tzid}
+            if (ev.get("rrule") or "").strip() and ev.get("is_utc") and tzid:
+                from src.caldav_sync import normalize_recurring_wall_clock
+                start, end, is_utc = normalize_recurring_wall_clock(
+                    ev["dtstart"], ev["dtend"], ev["rrule"], ev.get("location") or "", True
+                )
+                ev = {**ev, "dtstart": start, "dtend": end, "is_utc": is_utc}
         result = await asyncio.to_thread(
             _writeback_blocking, calendar_id, ev, delete, url, user, pw, owner, acc_id
         )

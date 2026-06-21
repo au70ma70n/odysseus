@@ -1630,12 +1630,14 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
     from core.database import SessionLocal, CalendarCal, CalendarEvent, Note
     from routes.calendar_routes import (
         _ensure_default_calendar,
+        _default_calendar_for_create,
         _parse_dt,
         _parse_dt_pair,
         parse_due_for_user,
         _resolve_base_uid,
         _push_caldav_event_after_commit,
         _record_caldav_delete_tombstone,
+        _apply_event_start_end_update,
     )
     import uuid as _uuid
 
@@ -1919,7 +1921,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                            .filter(CalendarCal.id.like(f"{cal_href}%"))
                            .first())
             if not cal:
-                cal = _ensure_default_calendar(db, owner)
+                cal = _default_calendar_for_create(db, owner)
 
             all_day = bool(args.get("all_day", False))
             try:
@@ -2069,20 +2071,13 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 ev.description = args["description"]
             if args.get("location") is not None:
                 ev.location = args["location"]
-            if args.get("dtstart") is not None:
-                # Anchor naive/natural-language input to the USER's timezone and
-                # refresh is_utc, exactly like create_event. Parsing with the
-                # raw server-local _parse_dt here (and never touching is_utc)
-                # silently shifted an updated event by the user's UTC offset.
-                _eff_all_day = (
-                    args["all_day"] if args.get("all_day") is not None else ev.all_day
-                )
-                ev.dtstart, _su = _parse_event_dt(args["dtstart"])
-                ev.is_utc = bool(_su and not _eff_all_day)
-            if args.get("dtend") is not None:
-                ev.dtend, _eu = _parse_event_dt(args["dtend"])
-            if args.get("all_day") is not None:
-                ev.all_day = args["all_day"]
+            _apply_event_start_end_update(
+                ev,
+                dtstart_raw=args.get("dtstart"),
+                dtend_raw=args.get("dtend"),
+                all_day=args.get("all_day"),
+                parse_dt=_parse_event_dt,
+            )
             # Tag/category + importance updates (any of these aliases).
             _tag = (args.get("event_type") or args.get("tag")
                     or args.get("category") or args.get("type"))

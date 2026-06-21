@@ -150,6 +150,43 @@ def _stable_cal_id(remote_url: str, owner: str = "", account_id: str = "") -> st
     return f"caldav-{h}"
 
 
+def _infer_wall_clock_tz(location: str = "") -> str | None:
+    """Best-effort IANA tz for recurring wall-clock events."""
+    loc = (location or "").lower()
+    if any(tok in loc for tok in ("houston", "tomball", ", tx", " texas")):
+        return "America/Chicago"
+    try:
+        from src.user_time import get_user_tz_name
+        return get_user_tz_name()
+    except Exception:
+        return None
+
+
+def normalize_recurring_wall_clock(
+    start_dt: datetime,
+    end_dt: datetime,
+    rrule: str,
+    location: str,
+    is_utc: bool,
+) -> tuple[datetime, datetime, bool]:
+    """Store weekly BYDAY events as naive local wall-clock times.
+
+    Proton/ferroxide often export UTC ``Z`` times. At UTC midnight on
+  Thursday, US Central sees Wednesday evening — wrong weekday for trivia.
+    """
+    if not rrule or "BYDAY" not in rrule.upper() or not is_utc:
+        return start_dt, end_dt, is_utc
+    tz_name = _infer_wall_clock_tz(location)
+    if not tz_name:
+        return start_dt, end_dt, is_utc
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(tz_name)
+    start_local = start_dt.replace(tzinfo=timezone.utc).astimezone(tz).replace(tzinfo=None)
+    end_local = end_dt.replace(tzinfo=timezone.utc).astimezone(tz).replace(tzinfo=None)
+    return start_local, end_local, False
+
+
 def _to_utc_naive(dt):
     """CalDAV datetimes can be tz-aware (with a TZID) or naive. The DB
     column is naive but we set is_utc=True so the serializer adds Z.
@@ -406,6 +443,9 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                             comp.get("rrule").to_ical().decode()
                             if comp.get("rrule")
                             else ""
+                        )
+                        start_dt, end_dt, row_is_utc = normalize_recurring_wall_clock(
+                            start_dt, end_dt, rrule, location, row_is_utc
                         )
 
                         existing = _find_existing_event(db, pending, uid_val, local_cal.id)

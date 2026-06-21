@@ -379,6 +379,89 @@ def _parse_dt_pair(s: str):
         return _parse_dt(s), False
 
 
+_WEEKDAY_BYDAY = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+
+
+def _is_date_only(s: str) -> bool:
+    s = (s or "").strip()
+    return len(s) == 10 and s[4] == "-" and s[7] == "-"
+
+
+def _sync_rrule_byday_with_start(rrule: str, dtstart: datetime) -> str:
+    """Align RRULE BYDAY with the event start weekday after a reschedule."""
+    if not rrule:
+        return rrule
+    byday = _WEEKDAY_BYDAY[dtstart.weekday()]
+    if re.search(r"BYDAY=", rrule, re.I):
+        return re.sub(r"BYDAY=[^;]+", f"BYDAY={byday}", rrule, flags=re.I)
+    return rrule
+
+
+def _apply_event_start_end_update(
+    ev,
+    *,
+    dtstart_raw=None,
+    dtend_raw=None,
+    all_day=None,
+    parse_dt=None,
+):
+    """Update start/end on a calendar row; recalc end and RRULE when needed."""
+    parse_dt = parse_dt or _parse_dt_pair
+    eff_all_day = ev.all_day if all_day is None else bool(all_day)
+    old_start, old_end = ev.dtstart, ev.dtend
+
+    if dtstart_raw is not None:
+        raw = str(dtstart_raw).strip()
+        if _is_date_only(raw):
+            new_start, new_is_utc = datetime.fromisoformat(raw), False
+            if all_day is None:
+                eff_all_day = True
+        else:
+            new_start, new_is_utc = parse_dt(raw)
+        ev.dtstart = new_start
+        ev.all_day = eff_all_day
+        ev.is_utc = bool(new_is_utc and not eff_all_day)
+
+        if dtend_raw is not None:
+            end_raw = str(dtend_raw).strip()
+            if _is_date_only(end_raw) and eff_all_day:
+                ev.dtend = datetime.fromisoformat(end_raw) + timedelta(days=1)
+                ev.is_utc = False
+            else:
+                ev.dtend, end_utc = parse_dt(end_raw)
+                if end_utc and not eff_all_day:
+                    ev.is_utc = True
+        elif eff_all_day:
+            ev.dtend = new_start + timedelta(days=1)
+            ev.is_utc = False
+        else:
+            duration = (
+                (old_end - old_start)
+                if old_end and old_start and old_end > old_start
+                else timedelta(hours=1)
+            )
+            ev.dtend = new_start + duration
+
+        if ev.rrule:
+            ev.rrule = _sync_rrule_byday_with_start(ev.rrule, ev.dtstart)
+    elif dtend_raw is not None:
+        end_raw = str(dtend_raw).strip()
+        if _is_date_only(end_raw) and eff_all_day:
+            ev.dtend = datetime.fromisoformat(end_raw) + timedelta(days=1)
+            ev.is_utc = False
+        else:
+            ev.dtend, end_utc = parse_dt(end_raw)
+            if end_utc and not eff_all_day:
+                ev.is_utc = True
+
+    if all_day is not None:
+        ev.all_day = bool(all_day)
+        if ev.all_day:
+            ev.is_utc = False
+            if dtstart_raw is None and ev.dtstart and ev.dtend:
+                ev.dtend = ev.dtstart + timedelta(days=1)
+
+
 def _parse_dt(s: str) -> datetime:
     """Parse a date/datetime string.
 
@@ -550,7 +633,16 @@ def _expand_rrule(
     Non-recurring events (empty rrule) are returned as a single-item
     list — the caller doesn't need to branch.
     """
-    duration = ev.dtend - ev.dtstart
+    anchor_start = ev.dtstart
+    anchor_end = ev.dtend
+    use_wall_clock = False
+    if ev.rrule and "BYDAY" in ev.rrule.upper() and ev.is_utc:
+        from src.caldav_sync import normalize_recurring_wall_clock
+        anchor_start, anchor_end, _ = normalize_recurring_wall_clock(
+            ev.dtstart, ev.dtend, ev.rrule, ev.location or "", ev.is_utc
+        )
+        use_wall_clock = True
+    duration = anchor_end - anchor_start
 
     if not ev.rrule or not ev.rrule.strip():
         # Non-recurring — return the base event as-is. list_events
@@ -577,7 +669,7 @@ def _expand_rrule(
             r"(UNTIL=\d{8}(?:T\d{6})?)Z", r"\1", rrule_str, flags=_re.IGNORECASE
         )
     try:
-        rule = rrulestr(rrule_str, dtstart=ev.dtstart)
+        rule = rrulestr(rrule_str, dtstart=anchor_start)
     except Exception as ex:
         logger.warning(
             "Failed to parse rrule=%r for event %s: %s", ev.rrule, ev.uid, ex
@@ -634,10 +726,10 @@ def _expand_rrule(
             d["dtstart"] = occ_start.strftime("%Y-%m-%d")
             d["dtend"] = occ_end.strftime("%Y-%m-%d")
         else:
-            suffix = "Z" if getattr(ev, "is_utc", False) else ""
+            suffix = "" if use_wall_clock else ("Z" if getattr(ev, "is_utc", False) else "")
             d["dtstart"] = occ_start.isoformat() + suffix
             d["dtend"] = occ_end.isoformat() + suffix
-            d["is_utc"] = bool(getattr(ev, "is_utc", False))
+            d["is_utc"] = False if use_wall_clock else bool(getattr(ev, "is_utc", False))
 
         results.append(d)
 
@@ -1097,21 +1189,12 @@ def setup_calendar_routes() -> APIRouter:
                 ev.description = data.description
             if data.location is not None:
                 ev.location = data.location
-            if data.dtstart is not None:
-                ev.dtstart, _s_utc = _parse_dt_pair(data.dtstart)
-                # When the incoming payload carries tz info, mark the row as
-                # UTC-stored so the serializer adds Z. Don't flip the flag
-                # off if start arrives naive but end was UTC — only escalate.
-                if _s_utc:
-                    ev.is_utc = True
-            if data.dtend is not None:
-                ev.dtend, _e_utc = _parse_dt_pair(data.dtend)
-                if _e_utc:
-                    ev.is_utc = True
-            if data.all_day is not None:
-                ev.all_day = data.all_day
-                if data.all_day:
-                    ev.is_utc = False  # all-day stays date-only
+            _apply_event_start_end_update(
+                ev,
+                dtstart_raw=data.dtstart,
+                dtend_raw=data.dtend,
+                all_day=data.all_day,
+            )
             if data.rrule is not None:
                 ev.rrule = data.rrule
             if data.color is not None:
