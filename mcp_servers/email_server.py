@@ -541,6 +541,263 @@ def _get_cached_summaries():
 # ── Tool implementations ──
 
 
+def _list_email_folders(account=None) -> list[str]:
+    """Return IMAP mailbox names (folders/labels) for an account."""
+    conn = None
+    try:
+        conn = _imap_connect(account)
+        folders = _list_folder_lines(conn)
+        names = [name for name in (_folder_name_from_list_line(f) for f in folders) if name]
+        # Stable order: INBOX first, then alphabetical (case-insensitive).
+        unique = sorted(set(names), key=lambda n: (0 if n.upper() == "INBOX" else 1, n.lower()))
+        return unique
+    finally:
+        if conn:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+
+# System / provider folders that must not be renamed or deleted via label tools.
+_PROTECTED_MAILBOX_BASENAMES = frozenset({
+    "inbox", "sent", "drafts", "trash", "spam", "starred", "archive", "all mail",
+    "junk", "folders", "labels",
+})
+
+
+def _folder_names_on_conn(conn) -> list[str]:
+    return [name for name in (_folder_name_from_list_line(f) for f in _list_folder_lines(conn)) if name]
+
+
+def _uses_labels_prefix(conn) -> bool:
+    return any(n.startswith("Labels/") for n in _folder_names_on_conn(conn))
+
+
+def _normalize_label_path(name: str, conn, *, existing_ok: bool = True) -> str:
+    """Map a short label name to the provider's IMAP mailbox path (e.g. Labels/Banking)."""
+    raw = (name or "").strip()
+    if not raw:
+        raise ValueError("label name is required")
+    names = _folder_names_on_conn(conn)
+    if existing_ok and raw in names:
+        return raw
+    lower_map = {n.lower(): n for n in names}
+    if existing_ok and raw.lower() in lower_map:
+        return lower_map[raw.lower()]
+    if "/" in raw:
+        return raw
+    if _uses_labels_prefix(conn):
+        candidate = f"Labels/{raw}"
+        if existing_ok and candidate in names:
+            return candidate
+        if existing_ok and candidate.lower() in lower_map:
+            return lower_map[candidate.lower()]
+        return candidate
+    return raw
+
+
+def _assert_label_mutable(path: str) -> None:
+    base = (path or "").split("/")[-1].strip().lower()
+    if base in _PROTECTED_MAILBOX_BASENAMES:
+        raise ValueError(f"Refusing to modify protected mailbox: {path}")
+    upper = (path or "").upper()
+    if upper in ("INBOX", "SENT", "DRAFTS", "TRASH", "SPAM", "STARRED", "ARCHIVE", "ALL MAIL"):
+        raise ValueError(f"Refusing to modify protected mailbox: {path}")
+
+
+def _create_email_label(label: str, account=None) -> str:
+    conn = _imap_connect(account)
+    try:
+        path = _normalize_label_path(label, conn, existing_ok=False)
+        _assert_label_mutable(path)
+        if path in _folder_names_on_conn(conn):
+            return f"Label already exists: `{path}`"
+        status, data = conn.create(_q(path))
+        if status != "OK":
+            detail = (data[0].decode(errors="replace") if data and data[0] else status)
+            raise ValueError(f"IMAP CREATE failed for `{path}`: {detail}")
+        return f"Created label `{path}`"
+    finally:
+        conn.logout()
+
+
+def _rename_email_label(from_label: str, to_label: str, account=None) -> str:
+    conn = _imap_connect(account)
+    try:
+        old_path = _normalize_label_path(from_label, conn)
+        new_path = _normalize_label_path(to_label, conn, existing_ok=False)
+        _assert_label_mutable(old_path)
+        _assert_label_mutable(new_path)
+        names = set(_folder_names_on_conn(conn))
+        if old_path not in names:
+            raise ValueError(f"Label not found: {from_label!r} (resolved `{old_path}`)")
+        if new_path in names:
+            raise ValueError(f"Target label already exists: `{new_path}`")
+        status, data = conn.rename(_q(old_path), _q(new_path))
+        if status != "OK":
+            detail = (data[0].decode(errors="replace") if data and data[0] else status)
+            raise ValueError(f"IMAP RENAME failed: {detail}")
+        return f"Renamed label `{old_path}` → `{new_path}`"
+    finally:
+        conn.logout()
+
+
+def _delete_email_label(label: str, account=None) -> str:
+    conn = _imap_connect(account)
+    try:
+        path = _normalize_label_path(label, conn)
+        _assert_label_mutable(path)
+        names = set(_folder_names_on_conn(conn))
+        if path not in names:
+            raise ValueError(f"Label not found: {label!r} (resolved `{path}`)")
+        status, data = conn.delete(_q(path))
+        if status != "OK":
+            detail = (data[0].decode(errors="replace") if data and data[0] else status)
+            raise ValueError(f"IMAP DELETE failed for `{path}`: {detail}")
+        return f"Deleted label `{path}`"
+    finally:
+        conn.logout()
+
+
+def _copy_messages_to_folder(uids, source_folder: str, dest_folder: str, account=None) -> int:
+    """COPY messages to another folder/label (keeps source copy — use for applying labels)."""
+    if not uids:
+        return 0
+    conn = _imap_connect(account)
+    try:
+        conn.select(_q(source_folder))
+        dest = _normalize_label_path(dest_folder, conn)
+        dest = _resolve_folder(conn, dest, _folder_role_from_name(dest))
+        msg_set = ",".join(str(u) for u in uids)
+        status, data = conn.uid("FETCH", _b(msg_set), "(UID)")
+        if status != "OK" or not _uid_fetch_rows(data):
+            return 0
+        status, _ = conn.uid("COPY", _b(msg_set), _q(dest))
+        if status != "OK":
+            return 0
+        return len(_uid_fetch_rows(data))
+    finally:
+        conn.logout()
+
+
+def _remove_messages_from_folder(uids, folder: str, account=None) -> int:
+    """Remove messages from a label folder only (expunge copies in that mailbox)."""
+    if not uids:
+        return 0
+    conn = _imap_connect(account)
+    try:
+        path = _normalize_label_path(folder, conn)
+        conn.select(_q(path))
+        msg_set = ",".join(str(u) for u in uids)
+        status, data = conn.uid("FETCH", _b(msg_set), "(UID)")
+        if status != "OK" or not _uid_fetch_rows(data):
+            return 0
+        count = len(_uid_fetch_rows(data))
+        status, _ = conn.uid("STORE", _b(msg_set), "+FLAGS", "\\Deleted")
+        if status != "OK":
+            return 0
+        conn.expunge()
+        return count
+    finally:
+        conn.logout()
+
+
+def _merge_email_labels(source_label: str, dest_label: str, account=None) -> str:
+    """Move all messages from source label to dest, then delete the source label."""
+    conn = _imap_connect(account)
+    try:
+        source = _normalize_label_path(source_label, conn)
+        dest = _normalize_label_path(dest_label, conn)
+    finally:
+        conn.logout()
+    _assert_label_mutable(source)
+    _assert_label_mutable(dest)
+    uids = _search_uids(source, "ALL", account=account)
+    moved = _bulk_move(uids, source, dest, account=account) if uids else 0
+    delete_note = ""
+    if source != dest:
+        try:
+            delete_note = " " + _delete_email_label(source, account=account) + "."
+        except Exception as e:
+            delete_note = f" Could not delete source label `{source}`: {e}"
+    return f"Merged `{source}` → `{dest}`: moved {moved} message(s).{delete_note}"
+
+
+def _manage_email_labels(arguments: dict) -> str:
+    action = str(arguments.get("action", "") or "").strip().lower()
+    acct = arguments.get("account")
+
+    if action == "create":
+        label = arguments.get("label") or arguments.get("name")
+        if not label:
+            raise ValueError("create requires label")
+        return _create_email_label(label, account=acct)
+
+    if action == "rename":
+        from_label = arguments.get("from_label") or arguments.get("old_label") or arguments.get("from")
+        to_label = arguments.get("to_label") or arguments.get("new_label") or arguments.get("to")
+        if not from_label or not to_label:
+            raise ValueError("rename requires from_label and to_label")
+        return _rename_email_label(from_label, to_label, account=acct)
+
+    if action == "delete":
+        label = arguments.get("label") or arguments.get("name")
+        if not label:
+            raise ValueError("delete requires label")
+        return _delete_email_label(label, account=acct)
+
+    if action == "apply":
+        uids = arguments.get("uids") or []
+        if isinstance(uids, str):
+            uids = [uids]
+        label = arguments.get("label") or arguments.get("dest_label") or arguments.get("dest")
+        source_folder = arguments.get("folder") or arguments.get("source_folder") or "INBOX"
+        if not uids:
+            raise ValueError("apply requires uids")
+        if not label:
+            raise ValueError("apply requires label")
+        n = _copy_messages_to_folder(uids, source_folder, label, account=acct)
+        return f"Applied label to {n} message(s) (copied to `{label}`; originals kept in `{source_folder}`)."
+
+    if action == "remove":
+        uids = arguments.get("uids") or []
+        if isinstance(uids, str):
+            uids = [uids]
+        label = arguments.get("label")
+        if not uids:
+            raise ValueError("remove requires uids")
+        if not label:
+            raise ValueError("remove requires label")
+        n = _remove_messages_from_folder(uids, label, account=acct)
+        return f"Removed {n} message(s) from label `{label}`."
+
+    if action == "move":
+        uids = arguments.get("uids") or []
+        if isinstance(uids, str):
+            uids = [uids]
+        source_folder = arguments.get("folder") or arguments.get("source_folder") or "INBOX"
+        dest = arguments.get("label") or arguments.get("dest_label") or arguments.get("dest_folder")
+        if not uids:
+            raise ValueError("move requires uids")
+        if not dest:
+            raise ValueError("move requires label or dest_folder")
+        n = _bulk_move(uids, source_folder, dest, account=acct)
+        return f"Moved {n} message(s) from `{source_folder}` to `{dest}`."
+
+    if action == "merge":
+        source = arguments.get("source_label") or arguments.get("from_label") or arguments.get("from")
+        dest = arguments.get("dest_label") or arguments.get("to_label") or arguments.get("to")
+        if not source or not dest:
+            raise ValueError("merge requires source_label and dest_label")
+        return _merge_email_labels(source, dest, account=acct)
+
+    raise ValueError(
+        "Unknown action. Use create, rename, delete, apply, remove, move, or merge. "
+        "Call list_email_folders first for exact label paths."
+    )
+
+
 def _list_emails(folder="INBOX", max_results=20, unresponded_only=False,
                  unread_only=False, account=None):
     """List emails newest-first. By default returns the latest messages,
@@ -1673,6 +1930,62 @@ async def list_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
         Tool(
+            name="list_email_folders",
+            description=(
+                "List IMAP folders and labels for an email account. Proton Mail, Gmail, "
+                "and similar providers expose user labels as folder names (e.g. "
+                "`Labels/Banking`, `[Gmail]/Sent Mail`). Call this before list_emails "
+                "when the user asks about labels, folders, or mail in a named category."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {**ACCOUNT_PROP},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="manage_email_labels",
+            description=(
+                "Create, rename, delete, apply, remove, move, or merge email labels "
+                "(IMAP folders). Proton Mail labels live under `Labels/...`. Call "
+                "`list_email_folders` first for exact paths. Actions: `create` (label), "
+                "`rename` (from_label, to_label), `delete` (label), `apply` (uids, label, "
+                "folder — copies messages onto a label without removing from source), "
+                "`remove` (uids, label — removes copies from that label only), `move` "
+                "(uids, label/dest_folder, folder — moves between mailboxes), `merge` "
+                "(source_label, dest_label — move all messages then delete source)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "rename", "delete", "apply", "remove", "move", "merge"],
+                        "description": "Label operation to perform",
+                    },
+                    "label": {"type": "string", "description": "Label name or path (create/delete/apply/remove/move)"},
+                    "name": {"type": "string", "description": "Alias for label on create/delete"},
+                    "from_label": {"type": "string", "description": "Source label for rename/merge"},
+                    "to_label": {"type": "string", "description": "Target label for rename"},
+                    "source_label": {"type": "string", "description": "Source label for merge"},
+                    "dest_label": {"type": "string", "description": "Destination label for merge/move"},
+                    "dest_folder": {"type": "string", "description": "Destination folder for move"},
+                    "folder": {
+                        "type": "string",
+                        "description": "Source folder for apply/move (default INBOX)",
+                        "default": "INBOX",
+                    },
+                    "uids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Message UIDs for apply/remove/move",
+                    },
+                    **ACCOUNT_PROP,
+                },
+                "required": ["action"],
+            },
+        ),
+        Tool(
             name="list_emails",
             description=(
                 "List unread or unresponded emails from the inbox. "
@@ -2006,6 +2319,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text="\n".join(lines))]
 
         acct = arguments.get("account")  # consumed by all email ops
+
+        if name == "list_email_folders":
+            try:
+                folders = _list_email_folders(account=acct)
+            except Exception as e:
+                return [TextContent(type="text", text=f"Failed to list folders: {e}")]
+            if not folders:
+                return [TextContent(type="text", text="No folders found.")]
+            active_cfg = _load_config(acct)
+            acct_name = active_cfg.get("account_name") or active_cfg.get("imap_user") or "default"
+            lines = [f"Folders/labels for account `{acct_name}` ({len(folders)}):\n"]
+            for i, folder in enumerate(folders, 1):
+                lines.append(f"{i}. {folder}")
+            lines.append(
+                "\nPass the exact folder name to `list_emails`, `read_email`, or "
+                "`search_emails` via the `folder` / `folders` argument."
+            )
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        if name == "manage_email_labels":
+            try:
+                result = _manage_email_labels(arguments)
+            except Exception as e:
+                return [TextContent(type="text", text=f"Label operation failed: {e}")]
+            return [TextContent(type="text", text=result)]
 
         if name == "list_emails":
             max_results = arguments.get("max_results", arguments.get("limit", 20))

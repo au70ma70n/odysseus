@@ -21,9 +21,16 @@ logger = logging.getLogger(__name__)
 
 # Pattern 1: ```bash ... ``` fenced code blocks
 _TOOL_BLOCK_RE = re.compile(
-    r"```(" + "|".join(TOOL_TAGS) + r")\s*\n([\s\S]*?)```",
+    r"```(" + "|".join(TOOL_TAGS) + r")(?:\s*\n([\s\S]*?))?```",
     re.IGNORECASE,
 )
+
+# Fenced tools whose body must be non-empty (a bare ```bash``` is not a call).
+_FENCED_BODY_REQUIRED = frozenset({
+    "bash", "python", "web_search", "web_fetch", "read_file", "write_file",
+    "grep", "glob", "ls", "create_document", "update_document", "edit_document",
+    "suggest_document", "generate_image", "chat_with_model", "ask_teacher",
+})
 
 # Pattern 2: [TOOL_CALL] ... [/TOOL_CALL] blocks (some models use this format)
 # Matches: {tool => "shell", args => {--command "ls -la"}} etc.
@@ -688,9 +695,12 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     if not skip_fenced:
         for m in _TOOL_BLOCK_RE.finditer(text):
             tag = m.group(1).lower()
-            content = m.group(2).strip()
+            content = (m.group(2) or "").strip()
             if not content:
-                continue
+                if tag in _FENCED_BODY_REQUIRED:
+                    continue
+                # JSON-arg tools (email MCP, manage_*, etc.) accept {}.
+                content = "{}"
             # If a code block's content is an <invoke> XML call (some models wrap
             # tool calls in ```python or ```xml fences), parse the invoke instead.
             if '<invoke' in content:

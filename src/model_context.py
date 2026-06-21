@@ -181,6 +181,8 @@ KNOWN_CONTEXT_WINDOWS = {
     'llama-3': 131072,
 
     # --- Qwen ---
+    'qwen3.6': 262144,
+    'qwen3.5': 262144,
     'qwen3': 131072,
     'qwen2.5': 131072,
     'qwen2': 32768,
@@ -312,6 +314,78 @@ def _lookup_known(model: str) -> Optional[int]:
     return best_ctx
 
 
+def _ollama_api_base(endpoint_url: str) -> Optional[str]:
+    """Native Ollama API root (…/api) for an OpenAI-compat or /api/* endpoint URL."""
+    try:
+        from src.llm_core import _is_ollama_native_url, _is_ollama_openai_compat_url
+    except ImportError:
+        return None
+    if not (_is_ollama_openai_compat_url(endpoint_url) or _is_ollama_native_url(endpoint_url)):
+        return None
+    parsed = urlparse(endpoint_url or "")
+    if not parsed.hostname:
+        return None
+    scheme = parsed.scheme or "http"
+    netloc = parsed.netloc
+    if not netloc:
+        return None
+    return f"{scheme}://{netloc}/api"
+
+
+def _parse_ollama_parameters_num_ctx(parameters: str) -> Optional[int]:
+    """Parse ``num_ctx`` from Ollama ``/api/show``'s human-readable parameters block."""
+    for line in (parameters or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("num_ctx"):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 2:
+            try:
+                val = int(parts[-1])
+            except ValueError:
+                continue
+            if val > 0:
+                return val
+    return None
+
+
+def _query_ollama_serving_context(endpoint_url: str, model: str) -> Optional[int]:
+    """Return Ollama's configured serving context (PARAMETER num_ctx) for a model.
+
+    OpenAI-compat ``/v1/models`` does not expose this; the Modelfile value is the
+  actual window Ollama allocates (e.g. 190000 on GPU), which can be below the
+    GGUF architectural maximum (e.g. 262144 for Qwen 3.6).
+    """
+    api_base = _ollama_api_base(endpoint_url)
+    if not api_base:
+        return None
+    try:
+        r = httpx.post(f"{api_base}/show", json={"name": model}, timeout=REQUEST_TIMEOUT)
+        if r.is_success:
+            data = r.json()
+            num_ctx = _parse_ollama_parameters_num_ctx(data.get("parameters") or "")
+            if num_ctx:
+                return num_ctx
+    except Exception as e:
+        logger.debug(f"Ollama /api/show failed for {model}: {e}")
+
+    # Loaded-model fallback: /api/ps reports the live context_length.
+    try:
+        r = httpx.get(f"{api_base}/ps", timeout=REQUEST_TIMEOUT)
+        if r.is_success:
+            for entry in r.json().get("models") or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("model") or ""
+                if name == model or name.split(":")[0] == model.split(":")[0]:
+                    ctx = entry.get("context_length")
+                    if isinstance(ctx, int) and ctx > 0:
+                        return ctx
+    except Exception as e:
+        logger.debug(f"Ollama /api/ps failed for {model}: {e}")
+    return None
+
+
 def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Query the model API for context length. Returns (context_length, known) where
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
@@ -342,6 +416,12 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
                         return n_ctx, True
         except Exception:
             pass
+
+    # Ollama: /v1/models omits context; read PARAMETER num_ctx from /api/show.
+    ollama_ctx = _query_ollama_serving_context(endpoint_url, model)
+    if ollama_ctx:
+        logger.info(f"Ollama reports num_ctx={ollama_ctx} for {model}")
+        return ollama_ctx, True
 
     # GitHub Copilot's /models requires auth + X-GitHub-Api-Version headers that
     # aren't available here; an unauthenticated probe just 400s. All Copilot

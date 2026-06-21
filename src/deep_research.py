@@ -314,6 +314,7 @@ class DeepResearcher:
             round_findings = await self._search_and_extract(queries, question)
             if round_findings:
                 findings.extend(round_findings)
+                self.findings = findings  # keep handler-visible copy in sync
                 consecutive_empty_rounds = 0
                 logger.info(f"Round {round_num}: extracted {len(round_findings)} findings")
                 self._emit(phase="reading", round=round_num,
@@ -366,6 +367,7 @@ class DeepResearcher:
             return "No information could be gathered for this question."
 
         self.evolving_report = report  # preserve pre-synthesis report
+        self.findings = findings
         final = await self._final_report(question, report)
         elapsed = time.time() - self._start_time
         logger.info(

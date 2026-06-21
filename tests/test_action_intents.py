@@ -44,6 +44,17 @@ def test_email_and_ui_actions_promote_to_agent():
     assert message_needs_tools("turn off web search")
 
 
+def test_email_label_and_folder_lookups_promote_to_agent():
+    assert message_needs_tools("how many labels do I have in my email?")
+    intent = classify_tool_intent("how many labels do I have in my email?")
+    assert intent.needs_tools
+    assert intent.category == "email"
+    assert message_needs_tools("what email labels do I have")
+    assert message_needs_tools("list my email labels")
+    assert message_needs_tools("show folders in my protonmail account")
+    assert message_needs_tools("what labels are in my inbox")
+
+
 def test_research_action_promotes_to_agent():
     assert message_needs_tools("research cost effective local models")
     assert message_needs_tools("can you look into GPU hosting options")

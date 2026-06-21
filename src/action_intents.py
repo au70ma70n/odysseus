@@ -86,6 +86,13 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("email", "check inbox request", r"\bcheck\s+(?:my\s+)?(?:email|inbox|mail)\b"),
         ("email", "unread email request", r"\bunread\s+(?:email|mail)s?\b"),
 
+        # Email label/folder lookup — needs list_email_folders, not memory.
+        ("email", "email label/folder lookup", r"\b(?:list|show|what|which|how many|count)\b.{0,120}\b(?:labels?|folders?|categories)\b"),
+        ("email", "email labels in mailbox", r"\b(?:labels?|folders?|categories)\b.{0,120}\b(?:in|on|for)\s+(?:my\s+)?(?:email|mail|inbox|protonmail|gmail|account|mailbox)\b"),
+        ("email", "my email labels", r"\b(?:my|the)\s+(?:email\s+)?(?:labels?|folders?)\b"),
+        ("email", "email label management", r"\b(?:create|rename|delete|remove|merge|apply|move)\b.{0,120}\b(?:labels?|folders?)\b"),
+        ("email", "reorganize email labels", r"\b(?:re-?organiz(?:e|ing)|clean\s+up|consolidat(?:e|ing))\b.{0,120}\b(?:labels?|folders?|inbox)\b"),
+
         # UI/control-plane actions that should open panels or flip toggles.
         ("ui", "open/show panel request", rf"{_PLEASE}(?:open|show|bring\s+up)\s+(?:me\s+)?(?:my\s+|the\s+)?{_PANEL}\b"),
         ("ui", "tool or feature toggle request", r"\b(?:disable|enable|turn\s+(?:on|off))\s+(?:the\s+)?(?:shell|search|web|browser|documents?|memory|skills|images?|calendar|email|mail|research|incognito)\b"),

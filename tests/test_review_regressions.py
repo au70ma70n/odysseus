@@ -683,6 +683,92 @@ async def test_email_mcp_dispatch_includes_hidden_owner(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_bare_email_tool_name_routes_to_mcp(monkeypatch):
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    class FakeMcp:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args):
+            self.calls.append((name, args))
+            return {"output": "[]", "exit_code": 0}
+
+    fake = FakeMcp()
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
+
+    desc, result = await execute_tool_block(
+        SimpleNamespace(tool_type="list_email_accounts", content="{}"),
+        owner="admin",
+    )
+
+    assert desc == "mcp: mcp__email__list_email_accounts"
+    assert result["exit_code"] == 0
+    assert fake.calls == [
+        ("mcp__email__list_email_accounts", {"_odysseus_owner": "admin"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_email_folders_routes_to_mcp(monkeypatch):
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    class FakeMcp:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args):
+            self.calls.append((name, args))
+            return {"output": "Folders/labels for account `ProtonMail` (2):\n\n1. INBOX\n2. Labels/Banking", "exit_code": 0}
+
+    fake = FakeMcp()
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
+
+    desc, result = await execute_tool_block(
+        SimpleNamespace(tool_type="list_email_folders", content='{"account":"ProtonMail"}'),
+        owner="admin",
+    )
+
+    assert desc == "mcp: mcp__email__list_email_folders"
+    assert result["exit_code"] == 0
+    assert fake.calls == [
+        ("mcp__email__list_email_folders", {"account": "ProtonMail", "_odysseus_owner": "admin"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_email_labels_alias_routes_to_folders(monkeypatch):
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    class FakeMcp:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, args):
+            self.calls.append((name, args))
+            return {"output": "ok", "exit_code": 0}
+
+    fake = FakeMcp()
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
+
+    desc, result = await execute_tool_block(
+        SimpleNamespace(tool_type="list_email_labels", content='{"account":"ProtonMail"}'),
+        owner="admin",
+    )
+    assert desc == "mcp: mcp__email__list_email_folders"
+    assert result["exit_code"] == 0
+    assert fake.calls == [
+        ("mcp__email__list_email_folders", {"account": "ProtonMail", "_odysseus_owner": "admin"}),
+    ]
+
+
 def test_public_agent_policy_hides_sensitive_tools(monkeypatch):
     auth_mod = _install_core_auth_stub(monkeypatch)
     from src.tool_security import blocked_tools_for_owner

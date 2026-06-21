@@ -324,6 +324,20 @@ _MCP_TOOL_MAP = {
     "generate_image": ("image_gen",  "generate_image"),
 }
 _EMAIL_MCP_OWNER_ARG = "_odysseus_owner"
+_BUILTIN_EMAIL_TOOLS = frozenset({
+    "list_email_accounts",
+    "list_email_folders",
+    "manage_email_labels",
+    "send_email",
+    "list_emails",
+    "read_email",
+    "reply_to_email",
+    "archive_email",
+    "delete_email",
+    "mark_email_read",
+    "bulk_email",
+    "download_attachment",
+})
 
 
 def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[str]]:
@@ -898,8 +912,12 @@ async def _execute_tool_block_impl(
     elif tool == "vault_unlock":
         desc = "vault_unlock"
         result = await do_vault_unlock(content, owner=owner)
-    elif tool.startswith("mcp__"):
-        # MCP tool dispatch
+    elif tool in _BUILTIN_EMAIL_TOOLS or tool == "list_email_labels" or tool.startswith("mcp__"):
+        # MCP tool dispatch (bare email tool names from fenced blocks → mcp__email__*)
+        if tool == "list_email_labels":
+            tool = "mcp__email__list_email_folders"
+        elif tool in _BUILTIN_EMAIL_TOOLS:
+            tool = f"mcp__email__{tool}"
         mcp = get_mcp_manager()
         if mcp:
             desc = f"mcp: {tool}"

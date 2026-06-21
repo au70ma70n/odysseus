@@ -190,6 +190,56 @@ class TestLookupKnown:
     def test_gpt4_base(self):
         assert _lookup_known("gpt-4") == 8192
 
+    def test_qwen36_not_shadowed_by_qwen3(self):
+        assert _lookup_known("huihui_ai/Qwen3.6-abliterated:35b") == 262144
+
+    def test_qwen35_not_shadowed_by_qwen3(self):
+        assert _lookup_known("qwen3.5:4b") == 262144
+
+
+class TestOllamaContext:
+    def setup_method(self):
+        model_context._context_cache.clear()
+
+    def test_parse_ollama_parameters_num_ctx(self):
+        params = "top_p                          0.95\nnum_ctx                        190000\ntemperature                    1"
+        assert model_context._parse_ollama_parameters_num_ctx(params) == 190000
+
+    def test_query_ollama_serving_context_from_show(self, monkeypatch):
+        class Resp:
+            is_success = True
+
+            def json(self):
+                return {"parameters": "num_ctx                        190000\n"}
+
+        def fake_post(url, json=None, timeout=None):
+            assert url.endswith("/api/show")
+            return Resp()
+
+        def fake_get(url, timeout=None):
+            raise AssertionError("ps should not be called when show succeeds")
+
+        monkeypatch.setattr(model_context.httpx, "post", fake_post)
+        monkeypatch.setattr(model_context.httpx, "get", fake_get)
+
+        ctx = model_context._query_ollama_serving_context(
+            "http://host.docker.internal:11434/v1", "huihui_ai/Qwen3.6-abliterated:35b"
+        )
+        assert ctx == 190000
+
+    def test_query_context_length_prefers_ollama_num_ctx(self, monkeypatch):
+        monkeypatch.setattr(
+            model_context,
+            "_query_ollama_serving_context",
+            lambda endpoint_url, model: 190000,
+        )
+
+        ctx, known = model_context._query_context_length(
+            "http://host.docker.internal:11434/v1", "huihui_ai/Qwen3.6-abliterated:35b"
+        )
+        assert ctx == 190000
+        assert known is True
+
 
 class TestGetContextLength:
     def setup_method(self):

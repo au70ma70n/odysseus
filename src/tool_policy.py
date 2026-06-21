@@ -42,6 +42,7 @@ _COMMON_TOOL_NAMES = {
     "list_cookbook_servers",
     "list_downloads",
     "list_emails",
+    "manage_email_labels",
     "list_models",
     "list_serve_presets",
     "list_served_models",

@@ -276,7 +276,7 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": {"web_search", "web_fetch", "trigger_research", "manage_research"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    "email": {"list_email_accounts", "list_email_folders", "manage_email_labels", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -429,6 +429,12 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
 ```
 Notes, checklists, AND user reminders. Use this for "create/add/write a note", todos, checklists, and "remind me to X at <time>" — never use memory for note content. For reminders, pair a short `title` (what to do) with a `due_date` (when). `due_date` accepts natural language ("tomorrow at 1pm", "in 2 hours", "next monday 9am") or ISO ("2026-05-12T13:00:00"). Actions: `list`, `add` (title, content OR items:[{text,done}], note_type, color, label, due_date), `update`, `delete`, `toggle_item`.""",
     "list_email_accounts": "- ```list_email_accounts``` — List configured email accounts. Use this before reading/sending when the user says Gmail, work mail, custom domain mail, or any non-default mailbox; pass the returned account name/email/id as `account` to email tools.",
+    "list_email_folders": "- ```list_email_folders``` — List IMAP folders and labels (Proton/Gmail labels appear as folder names like `Labels/Banking`). Use when the user asks about labels/folders; `list_email_labels` is an alias. Then pass the exact folder name to `list_emails`.",
+    "manage_email_labels": """\
+```manage_email_labels
+{"action": "merge", "source_label": "Labels/Banking-Paypal", "dest_label": "Labels/Banking", "account": "ProtonMail"}
+```
+Create, rename, delete, apply, remove, move, or merge email labels. Proton labels are IMAP folders under `Labels/...` — call `list_email_folders` first. Actions: `create` (label), `rename` (from_label, to_label), `delete` (label), `apply` (uids, label, folder — adds label copy), `remove` (uids, label), `move` (uids, label, folder), `merge` (source_label, dest_label — moves all messages then deletes source). Use for inbox re-organization requests.""",
     "send_email": """\
 ```send_email
 {"to": "recipient@example.com", "subject": "Re: Your question", "body": "Hi, ...", "account": "gmail"}
@@ -1245,10 +1251,11 @@ def _build_system_prompt(
     # or ui_control open_email_reply after the first tool round.
     _inject_style = False
     _EMAIL_TOOL_HINTS = {
-        "list_email_accounts", "send_email", "reply_to_email", "list_emails", "read_email",
+        "list_email_accounts", "list_email_folders", "manage_email_labels", "send_email", "reply_to_email", "list_emails", "read_email",
         "bulk_email", "archive_email", "delete_email", "mark_email_read",
         "resolve_contact", "ui_control",
-        "mcp__email__list_email_accounts",
+        "mcp__email__list_email_accounts", "mcp__email__list_email_folders",
+        "mcp__email__manage_email_labels",
         "mcp__email__send_email", "mcp__email__reply_to_email",
         "mcp__email__list_emails", "mcp__email__read_email",
         "mcp__email__bulk_email", "mcp__email__archive_email",

@@ -1054,6 +1054,58 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_email_folders",
+            "description": "List IMAP folders and labels for an email account. Proton Mail and Gmail expose user labels as folder names (e.g. Labels/Banking). Use before list_emails when the user asks about labels, folders, or mail in a named category.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_email_labels",
+            "description": "Alias for list_email_folders — list IMAP folders and labels (e.g. Proton Labels/Banking). Use when the user asks about email labels or categories.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_email_labels",
+            "description": "Create, rename, delete, apply, remove, move, or merge email labels (IMAP folders). Proton labels are under Labels/.... Call list_email_folders first for exact paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "rename", "delete", "apply", "remove", "move", "merge"],
+                    },
+                    "label": {"type": "string"},
+                    "from_label": {"type": "string"},
+                    "to_label": {"type": "string"},
+                    "source_label": {"type": "string"},
+                    "dest_label": {"type": "string"},
+                    "dest_folder": {"type": "string"},
+                    "folder": {"type": "string", "description": "Source folder for apply/move (default INBOX)"},
+                    "uids": {"type": "array", "items": {"type": "string"}},
+                    "account": {"type": "string", "description": "Optional account from list_email_accounts"},
+                },
+                "required": ["action"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "send_email",
             "description": "Send a new email. Use resolve_contact first if you only have a name and need to find the email address. If multiple accounts exist, pass account from list_email_accounts.",
             "parameters": {
@@ -1222,7 +1274,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         return None
 
     tool_type = _TOOL_NAME_MAP.get(name, name)
-    _BUILTIN_EMAIL_TOOLS = {"list_email_accounts", "send_email", "list_emails", "read_email", "reply_to_email",
+    _BUILTIN_EMAIL_TOOLS = {"list_email_accounts", "list_email_folders", "manage_email_labels", "send_email", "list_emails", "read_email", "reply_to_email",
                             "archive_email", "delete_email", "mark_email_read", "bulk_email", "download_attachment"}
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
@@ -1230,7 +1282,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     # the legacy empty-object coercion for stream robustness, but email MCP tools
     # must fail closed so a malformed call cannot read the default mailbox.
     if not isinstance(args, dict):
-        if tool_type.startswith("mcp__email__") or name in _BUILTIN_EMAIL_TOOLS:
+        if tool_type.startswith("mcp__email__") or name in _BUILTIN_EMAIL_TOOLS or name == "list_email_labels":
             logger.warning(f"Non-object email function call arguments for {name}: {args!r}; rejecting")
             return None
         logger.warning(f"Non-object function call arguments for {name}: {args!r}; treating as empty")
@@ -1241,6 +1293,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = json.dumps(args) if args else "{}"
         return ToolBlock(tool_type, content)
     # Email tools are implemented as MCP — route them to email
+    if name == "list_email_labels":
+        return ToolBlock("mcp__email__list_email_folders", json.dumps(args) if args else "{}")
     if name in _BUILTIN_EMAIL_TOOLS:
         return ToolBlock(f"mcp__email__{name}", json.dumps(args) if args else "{}")
     if tool_type not in TOOL_TAGS:
