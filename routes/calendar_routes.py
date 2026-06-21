@@ -219,6 +219,21 @@ def _ensure_default_calendar(db, owner: str = None) -> CalendarCal:
     return cal
 
 
+def _default_calendar_for_create(db, owner: str) -> CalendarCal:
+    """Prefer a CalDAV calendar (My calendar first) when creating events."""
+    caldav_cals = (
+        db.query(CalendarCal)
+        .filter(CalendarCal.owner == owner, CalendarCal.source == "caldav")
+        .all()
+    )
+    if caldav_cals:
+        for cal in caldav_cals:
+            if (cal.name or "").strip().lower() == "my calendar":
+                return cal
+        return caldav_cals[0]
+    return _ensure_default_calendar(db, owner)
+
+
 # Per-request user time context. chat_routes sets this from browser timezone
 # headers so natural-language times the LLM emits ("today at 9pm") are parsed
 # in the user's timezone, not the server's clock. None = unknown, fall back to
@@ -1021,7 +1036,7 @@ def setup_calendar_routes() -> APIRouter:
                 if cal and (cal.owner is None or cal.owner != owner):
                     raise HTTPException(404, "Calendar not found")
             if not cal:
-                cal = _ensure_default_calendar(db, owner)
+                cal = _default_calendar_for_create(db, owner)
 
             uid = str(uuid.uuid4())
             # Use the tz-detecting parser so events posted with an offset

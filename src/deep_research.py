@@ -370,6 +370,7 @@ class DeepResearcher:
         self.findings = findings
         final = await self._final_report(question, report)
         elapsed = time.time() - self._start_time
+        self.findings = findings  # final sync before handler persists sources
         logger.info(
             f"Research complete: {self.round_count} rounds, "
             f"{len(findings)} findings, {len(self.urls_fetched)} URLs, "

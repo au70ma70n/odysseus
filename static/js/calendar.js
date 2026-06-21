@@ -224,8 +224,16 @@ async function _syncCaldav(interactive) {
   }
 }
 
+// Prefer a CalDAV calendar for new events so they sync to Proton/iCloud/etc.
+function _defaultCalendarHref() {
+  const visible = _calendars.filter(c => !_hiddenCals.has(c.href));
+  const caldav = visible.filter(c => c.source === 'caldav');
+  const myCal = caldav.find(c => /^my calendar$/i.test(c.name || ''));
+  return (myCal || caldav[0] || visible[0] || _calendars[0])?.href || '';
+}
+
 function _optimisticEvent(data, uid) {
-  const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars[0];
+  const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars.find(c => c.href === _defaultCalendarHref()) || _calendars[0];
   return {
     uid,
     summary: data.summary || '',
@@ -2742,9 +2750,12 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
   // Default to all-day when dragging across multiple days
   const ad = existing ? existing.all_day : (defaultEndDate && defaultEndDate !== defaultDate);
 
-  let calOpts = _calendars.filter(c => !_hiddenCals.has(c.href)).map(c =>
-    `<option value="${_e(c.href)}" ${existing && existing.calendar_href === c.href ? 'selected' : ''}>${_e(c.name)}</option>`
-  ).join('');
+  let calOpts = _calendars.filter(c => !_hiddenCals.has(c.href)).map(c => {
+    const defaultHref = existing ? null : _defaultCalendarHref();
+    const selected = (existing && existing.calendar_href === c.href)
+      || (!existing && c.href === defaultHref);
+    return `<option value="${_e(c.href)}" ${selected ? 'selected' : ''}>${_e(c.name)}</option>`;
+  }).join('');
 
   // "Bespoke" event form: a big clock-face hero (time + date) and a single
   // title input. Everything else (location, description, recurrence,
@@ -3117,7 +3128,7 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       description: document.getElementById('cal-f-desc').value,
       location: document.getElementById('cal-f-loc').value,
       rrule: document.getElementById('cal-f-rrule').value || undefined,
-      calendar_href: document.getElementById('cal-f-cal')?.value || (_calendars[0]?.href || ''),
+      calendar_href: document.getElementById('cal-f-cal')?.value || _defaultCalendarHref(),
       color: colorVal || undefined,
     };
     try {

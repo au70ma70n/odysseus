@@ -522,6 +522,34 @@ class ResearchHandler:
         return None
 
     @staticmethod
+    def _sources_from_analyzed_urls(analyzed_urls: list) -> list:
+        """Build a source list from URLs fetched during search (fallback)."""
+        seen = set()
+        sources = []
+        for item in analyzed_urls or []:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url", "")
+            title = item.get("title", "") or url
+            if url and url not in seen:
+                seen.add(url)
+                sources.append({"url": url, "title": title})
+        return sources
+
+    @staticmethod
+    def _sources_from_markdown(md: str) -> list:
+        """Harvest [title](url) citations from report markdown (last resort)."""
+        import re
+        seen = set()
+        sources = []
+        for m in re.finditer(r'\[([^\]]+)\]\((https?://[^)]+)\)', md or ""):
+            title, url = m.group(1).strip(), m.group(2).strip()
+            if url not in seen:
+                seen.add(url)
+                sources.append({"url": url, "title": title or url})
+        return sources
+
+    @staticmethod
     def _extract_sources(findings: list) -> list:
         """Extract deduplicated [{url, title}] from findings, filtering low-quality ones."""
         seen = set()
@@ -612,6 +640,18 @@ class ResearchHandler:
             if researcher and researcher.findings:
                 sources = self._extract_sources(researcher.findings)
                 raw_findings = self._extract_raw_findings(researcher.findings)
+            if not sources and researcher:
+                sources = self._sources_from_analyzed_urls(
+                    getattr(researcher, "analyzed_urls", None)
+                )
+            if not sources:
+                md = entry.get("raw_report") or entry.get("result") or ""
+                sources = self._sources_from_markdown(md)
+                if sources and not raw_findings:
+                    raw_findings = [
+                        {"url": s["url"], "title": s["title"], "summary": s["title"]}
+                        for s in sources
+                    ]
             entry["sources"] = sources
 
             data = {

@@ -70,6 +70,12 @@ services:
       - GOOGLE_PSE_CX=${GOOGLE_PSE_CX:-}
       - TAVILY_API_KEY=${TAVILY_API_KEY:-}
       - SERPER_API_KEY=${SERPER_API_KEY:-}
+      # Local Proton Calendar bridge (ferroxide sidecar). Required because
+      # ferroxide resolves to a Docker-private IP.
+      - ODYSSEUS_ALLOW_PRIVATE_CALDAV=${ODYSSEUS_ALLOW_PRIVATE_CALDAV:-1}
+      - PROTON_CALDAV_URL=${PROTON_CALDAV_URL:-http://ferroxide:8081/}
+      - FERROXIDE_PROTON_USER=${FERROXIDE_PROTON_USER:-}
+      - FERROXIDE_BRIDGE_PASSWORD=${FERROXIDE_BRIDGE_PASSWORD:-}
       # PUID / PGID — the user/group the container drops to before
       # running uvicorn (entrypoint also chowns /app/data + /app/logs
       # to match, so bind-mounted files stay editable from the host).
@@ -85,6 +91,29 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_started
+      ferroxide:
+        condition: service_started
+    restart: unless-stopped
+
+  ferroxide:
+    build:
+      context: ./docker/ferroxide
+      args:
+        FERROXIDE_REF: ${FERROXIDE_REF:-456f067742f49f6ded386548a7e731084c50c8a1}
+    volumes:
+      - ${APP_DATA_DIR:-./data}/ferroxide:/config:z
+    environment:
+      - FERROXIDE_PROTON_USER=${FERROXIDE_PROTON_USER:-}
+      - FERROXIDE_BRIDGE_PASSWORD=${FERROXIDE_BRIDGE_PASSWORD:-}
+      - FERROXIDE_CONFIG_HOME=/config
+      - FERROXIDE_CALDAV_HOST=0.0.0.0
+      - FERROXIDE_CALDAV_PORT=8081
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --server-response http://127.0.0.1:8081/ 2>&1 | grep -q ' 401 '"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     restart: unless-stopped
 
   chromadb:

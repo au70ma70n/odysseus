@@ -984,8 +984,12 @@ function _buildJobCard(job) {
     // Library-loaded jobs have sources=null but pre-set sourceCount; fresh jobs
     // populate sources directly. Prefer the pre-set count if present.
     const srcCount = job.sources?.length ?? job.sourceCount ?? 0;
-    // 0 sources = the research couldn't gather/extract anything — flag it.
-    const failed = srcCount === 0;
+    const stats = job.stats || {};
+    const urlCount = Number(stats.URLs ?? stats['URLs'] ?? 0) || 0;
+    const hasReport = typeof job.result === 'string' && job.result.length > 400;
+    // Only flag failure when we truly gathered nothing (not when sources
+    // failed to persist but the report/stats show URLs were analyzed).
+    const failed = srcCount === 0 && urlCount === 0 && !hasReport;
     if (failed) card.classList.add('research-job-failed');
     const doneBadge = failed
       ? `<span class="research-cat-badge research-cat-failed">${_cancelIcon} no results</span>`

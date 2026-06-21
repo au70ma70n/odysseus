@@ -279,11 +279,17 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 if search and search.lower() not in query.lower():
                     continue
                 sources = d.get("sources", [])
+                stats = d.get("stats") or {}
+                source_count = len(sources)
+                if not source_count:
+                    urls = stats.get("URLs")
+                    if isinstance(urls, int) and urls > 0:
+                        source_count = urls
                 items.append({
                     "id": p.stem,
                     "query": query,
                     "category": d.get("category") or "",
-                    "source_count": len(sources),
+                    "source_count": source_count,
                     "status": d.get("status", "done"),
                     "duration": d.get("stats", {}).get("Duration", ""),
                     "rounds": d.get("stats", {}).get("Rounds", ""),
