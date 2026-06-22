@@ -272,6 +272,8 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, TrueNAS, or any other registered service), use `api_call` with the integration **name** (preferred) or id, HTTP method, path, and optional JSON body.
 - Example: `{"integration": "TrueNAS Scale", "method": "GET", "path": "/api/v2.0/app"}` — the field MUST be `integration`, not `integration_id` or `id`.
+- TrueNAS writes (deploy/start/delete apps) return a **job id** — poll `GET /api/v2.0/core/get_jobs?id=<id>` until `state` is SUCCESS or FAILED before telling the user the result.
+- ComfyUI is not in the TrueNAS catalog. Load skill `deploy-comfyui-truenas` and deploy as `custom_app` via `POST /api/v2.0/app`.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
 }
 

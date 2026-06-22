@@ -80,14 +80,22 @@ INTEGRATION_PRESETS: Dict[str, Dict[str, Any]] = {
         "name": "TrueNAS",
         "auth_type": "bearer",
         "description": (
-            "TrueNAS SCALE API (v2). Auth: Bearer API key from Credentials → API Keys.\n"
-            "Key endpoints:\n"
-            "  GET /api/v2.0/app — list installed apps\n"
-            "  GET /api/v2.0/app/available — browse catalog\n"
-            "  GET /api/v2.0/app/catalog — catalog metadata\n"
-            "  POST /api/v2.0/app — deploy an app\n"
-            "  GET /api/v2.0/pool — list storage pools\n"
-            "  GET /api/v2.0/system/info — health / version check"
+            "TrueNAS SCALE API (v2 REST wrapper + jobs). Auth: Bearer API key.\n"
+            "Read endpoints:\n"
+            "  GET /api/v2.0/system/info — version, hostname\n"
+            "  GET /api/v2.0/app — installed apps (name + state)\n"
+            "  GET /api/v2.0/app/id/{name} — one app details\n"
+            "  GET /api/v2.0/app/available — catalog app names (ComfyUI is NOT listed)\n"
+            "  GET /api/v2.0/app/used_ports — ports already taken\n"
+            "  GET /api/v2.0/app/gpu_choices — NVIDIA GPUs for GPU apps\n"
+            "  GET /api/v2.0/pool/dataset — datasets (use /mnt/{pool}/... in compose volumes)\n"
+            "  GET /api/v2.0/core/get_jobs?id={job_id} — poll async jobs\n"
+            "Write endpoints (return job id number — poll get_jobs until SUCCESS):\n"
+            "  POST /api/v2.0/app — app.create (body: app_name, custom_app, custom_compose_config_string)\n"
+            "  POST /api/v2.0/app/start — body {\"id\": \"appname\"}\n"
+            "  POST /api/v2.0/app/redeploy — body {\"app_name\": \"appname\"}\n"
+            "  DELETE /api/v2.0/app/id/{name} — remove app\n"
+            "ComfyUI: custom app only. Load skill deploy-comfyui-truenas before deploying."
         ),
     },
     "homeassistant": {
