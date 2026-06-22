@@ -1742,8 +1742,11 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     console.error('Error in selectSession:', error);
     uiModule.showError('Failed to load session: ' + error.message);
   } finally {
-    // Ensure memories are loaded after session selection
-    if (window.memoryModule && window.memoryModule.loadMemories) {
+    // Refresh memories only when the Brain modal is open — avoids extra API
+    // work on every session switch during active agent runs.
+    const memModal = document.getElementById('memory-modal');
+    if (window.memoryModule && window.memoryModule.loadMemories
+        && memModal && !memModal.classList.contains('hidden')) {
       await window.memoryModule.loadMemories();
     }
     // Auto-focus message input (unless session list has keyboard focus).

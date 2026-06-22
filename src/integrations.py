@@ -76,6 +76,20 @@ INTEGRATION_PRESETS: Dict[str, Dict[str, Any]] = {
             "  GET /api/tags/ — list tags"
         ),
     },
+    "truenas": {
+        "name": "TrueNAS",
+        "auth_type": "bearer",
+        "description": (
+            "TrueNAS SCALE API (v2). Auth: Bearer API key from Credentials → API Keys.\n"
+            "Key endpoints:\n"
+            "  GET /api/v2.0/app — list installed apps\n"
+            "  GET /api/v2.0/app/available — browse catalog\n"
+            "  GET /api/v2.0/app/catalog — catalog metadata\n"
+            "  POST /api/v2.0/app — deploy an app\n"
+            "  GET /api/v2.0/pool — list storage pools\n"
+            "  GET /api/v2.0/system/info — health / version check"
+        ),
+    },
     "homeassistant": {
         "name": "Home Assistant",
         "auth_type": "bearer",
@@ -203,6 +217,29 @@ def mask_integration_secret(integration: Dict[str, Any]) -> Dict[str, Any]:
     return safe
 
 
+def integration_tls_verify(integration: Dict[str, Any]) -> bool:
+    """Return httpx ``verify=`` for an integration (False = skip cert check)."""
+    return integration.get("verify_ssl") is not False
+
+
+def integration_health_path(integration: Dict[str, Any]) -> str:
+    """Default GET path for connectivity tests."""
+    preset = (integration.get("preset") or integration.get("name", "")).lower()
+    health_paths = {
+        "miniflux": "/v1/me",
+        "gitea": "/api/v1/version",
+        "linkding": "/api/tags/",
+        "homeassistant": "/api/",
+        "home assistant": "/api/",
+        "truenas": "/api/v2.0/system/info",
+    }
+    if preset in health_paths:
+        return health_paths[preset]
+    if "truenas" in preset or "truenas" in (integration.get("name") or "").lower():
+        return "/api/v2.0/system/info"
+    return "/"
+
+
 def _normalize_integration_base_url(base_url: Any) -> str:
     if not isinstance(base_url, str) or not base_url.strip():
         raise ValueError("Integration base URL is required")
@@ -275,6 +312,7 @@ def add_integration(data: Dict[str, Any]) -> Dict[str, Any]:
     integration.setdefault("api_key", "")
     integration.setdefault("name", "")
     integration.setdefault("base_url", "")
+    integration.setdefault("verify_ssl", True)
 
     if not isinstance(integration.get("name"), str) or not integration["name"].strip():
         raise HTTPException(400, "Integration name is required")
@@ -330,6 +368,98 @@ def _strip_html_tags(html: str) -> str:
     text = re.sub(r"<[^>]+>", "", html)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+_AGENT_JSON_LIMIT = 12000
+
+
+def _compact_object_list_summary(data: List[Any], limit: int = _AGENT_JSON_LIMIT) -> Optional[str]:
+    """Summarize a list of objects as name/state lines when full JSON is too fat."""
+    if not data or not all(isinstance(x, dict) for x in data):
+        return None
+    rows: List[str] = []
+    for item in data:
+        label = item.get("name") or item.get("id") or item.get("title")
+        if not label:
+            return None
+        extra = None
+        for key in ("state", "status", "version", "human_version"):
+            val = item.get(key)
+            if val not in (None, ""):
+                extra = str(val)
+                break
+        rows.append(f"{label} — {extra}" if extra else str(label))
+
+    header = f"{len(data)} items:\n"
+    lines = [f"- {row}" for row in rows]
+    text = header + "\n".join(lines)
+    if len(text) <= limit:
+        return text
+
+    out = header
+    shown = 0
+    for line in lines:
+        remaining_note = f"... ({len(data) - shown - 1} more, {len(data)} total)\n"
+        if len(out) + len(line) + 1 + len(remaining_note) > limit:
+            break
+        out += line + "\n"
+        shown += 1
+    remaining = len(data) - shown
+    if remaining:
+        out += f"... ({remaining} more, {len(data)} total)\n"
+    return out
+
+
+def _format_integration_json(data: Any, limit: int = _AGENT_JSON_LIMIT) -> str:
+    """Format JSON API payloads for agent consumption with sane truncation."""
+    full = json.dumps(data, indent=2, ensure_ascii=False)
+    if len(full) <= limit:
+        return full
+
+    if isinstance(data, list):
+        compact = _compact_object_list_summary(data, limit)
+        if compact:
+            return compact
+        sentinel_placeholder = {
+            "_truncated": True,
+            "total_items": len(data),
+            "shown_items": 0,
+        }
+        sentinel_overhead = len(
+            json.dumps(sentinel_placeholder, indent=2, ensure_ascii=False)
+        ) + 6
+        budget = limit - sentinel_overhead
+        lo, hi = 0, len(data)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            candidate = json.dumps(data[:mid], indent=2, ensure_ascii=False)
+            if len(candidate) < budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        sentinel = {
+            "_truncated": True,
+            "total_items": len(data),
+            "shown_items": lo,
+        }
+        return json.dumps(data[:lo] + [sentinel], indent=2, ensure_ascii=False)
+
+    if isinstance(data, dict):
+        kept: dict = {}
+        for k, v in data.items():
+            candidate = json.dumps(
+                {**kept, k: v, "_truncated": True},
+                indent=2,
+                ensure_ascii=False,
+            )
+            if len(candidate) <= limit:
+                kept[k] = v
+            else:
+                break
+        return json.dumps({**kept, "_truncated": True}, indent=2, ensure_ascii=False)
+
+    total = len(full)
+    return full[:limit] + f"\n... (truncated, {total} chars total)"
 
 
 def _find_integration(identifier: str) -> Optional[Dict[str, Any]]:
@@ -431,8 +561,9 @@ async def execute_api_call(
         if len(parts) == 2:
             auth = httpx.BasicAuth(parts[0], parts[1])
 
+    verify = integration_tls_verify(integration)
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
             response = await client.request(
                 method,
                 url,
@@ -449,80 +580,22 @@ async def execute_api_call(
         if "application/json" in content_type:
             try:
                 data = response.json()
-                full = json.dumps(data, indent=2, ensure_ascii=False)
-                if len(full) > 12000:
-                    if isinstance(data, list):
-                        # Binary-search for the largest prefix such that the
-                        # final array (prefix + sentinel) fits within the limit.
-                        # Pre-compute the sentinel so we know its serialized size.
-                        sentinel_placeholder = {
-                            "_truncated": True,
-                            "total_items": len(data),
-                            "shown_items": 0,
-                        }
-                        # Overhead: the sentinel appears as an extra array element.
-                        # Add a conservative padding for the separating comma,
-                        # newline, and indentation characters (~6 chars).
-                        sentinel_overhead = len(
-                            json.dumps(sentinel_placeholder, indent=2, ensure_ascii=False)
-                        ) + 6
-                        budget = 12000 - sentinel_overhead
-                        lo, hi = 0, len(data)
-                        while lo < hi:
-                            mid = (lo + hi + 1) // 2
-                            candidate = json.dumps(
-                                data[:mid], indent=2, ensure_ascii=False
-                            )
-                            if len(candidate) < budget:
-                                lo = mid
-                            else:
-                                hi = mid - 1
-                        sentinel = {
-                            "_truncated": True,
-                            "total_items": len(data),
-                            "shown_items": lo,
-                        }
-                        formatted = json.dumps(
-                            data[:lo] + [sentinel], indent=2, ensure_ascii=False
-                        )
-                    elif isinstance(data, dict):
-                        # Truncate dict entries until the result fits, then add
-                        # the _truncated marker.  Walk keys in insertion order.
-                        DICT_LIMIT = 12000
-                        kept: dict = {}
-                        for k, v in data.items():
-                            candidate = json.dumps(
-                                {**kept, k: v, "_truncated": True},
-                                indent=2,
-                                ensure_ascii=False,
-                            )
-                            if len(candidate) <= DICT_LIMIT:
-                                kept[k] = v
-                            else:
-                                break
-                        formatted = json.dumps(
-                            {**kept, "_truncated": True}, indent=2, ensure_ascii=False
-                        )
-                    else:
-                        total = len(full)
-                        formatted = full[:12000] + f"\n... (truncated, {total} chars total)"
-                else:
-                    formatted = full
+                formatted = _format_integration_json(data)
             except (json.JSONDecodeError, ValueError):
                 formatted = response.text
-                if len(formatted) > 12000:
+                if len(formatted) > _AGENT_JSON_LIMIT:
                     total = len(formatted)
-                    formatted = formatted[:12000] + f"\n... (truncated, {total} chars total)"
+                    formatted = formatted[:_AGENT_JSON_LIMIT] + f"\n... (truncated, {total} chars total)"
         elif "text/html" in content_type:
             formatted = _strip_html_tags(response.text)
-            if len(formatted) > 12000:
+            if len(formatted) > _AGENT_JSON_LIMIT:
                 total = len(formatted)
-                formatted = formatted[:12000] + f"\n... (truncated, {total} chars total)"
+                formatted = formatted[:_AGENT_JSON_LIMIT] + f"\n... (truncated, {total} chars total)"
         else:
             formatted = response.text
-            if len(formatted) > 12000:
+            if len(formatted) > _AGENT_JSON_LIMIT:
                 total = len(formatted)
-                formatted = formatted[:12000] + f"\n... (truncated, {total} chars total)"
+                formatted = formatted[:_AGENT_JSON_LIMIT] + f"\n... (truncated, {total} chars total)"
 
         output = f"HTTP {status}\n{formatted}"
 
@@ -554,10 +627,11 @@ def get_integrations_prompt() -> str:
     if not enabled:
         return ""
 
-    lines = ["You have access to the following API integrations via the api_call tool:\n"]
+    lines = ["You have access to the following API integrations via the api_call tool.\n"
+             "Call with JSON: {\"integration\": \"<name below>\", \"method\": \"GET\", \"path\": \"/...\"}\n"]
     for integ in enabled:
         name = integ.get("name", integ.get("id", "unknown"))
-        lines.append(f"## {name} (id: {integ['id']})")
+        lines.append(f"## {name} (id: {integ['id']}) — use integration: \"{name}\"")
         desc = integ.get("description", "")
         if desc:
             lines.append(desc)

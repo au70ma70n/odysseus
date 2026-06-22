@@ -21,6 +21,7 @@ from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, ToolPolicy
+from src.constants import UI_METADATA_OUTPUT_CHARS
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
     parse_tool_blocks,
@@ -269,7 +270,8 @@ _DOMAIN_RULES = {
 - Do NOT use `manage_memory` for contact lookups — contact details live in the address book, not memory.""",
     "integrations": """\
 ## Integration/API rules
-- To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
+- To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, TrueNAS, or any other registered service), use `api_call` with the integration **name** (preferred) or id, HTTP method, path, and optional JSON body.
+- Example: `{"integration": "TrueNAS Scale", "method": "GET", "path": "/api/v2.0/app"}` — the field MUST be `integration`, not `integration_id` or `id`.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
 }
 
@@ -937,7 +939,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # "integrations" domain seeds api_call deterministically (see
     # _DOMAIN_TOOL_MAP), independent of embedding retrieval.
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
-           r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
+           r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin|truenas)\b"):
         domains.add("integrations")
 
     low_signal = not continuation and not domains
@@ -3382,7 +3384,7 @@ async def stream_agent_loop(
                 "round": round_num,
                 "tool": block.tool_type,
                 "command": cmd_display,
-                "output": output_text,
+                "output": _truncate(output_text, UI_METADATA_OUTPUT_CHARS),
                 "exit_code": result.get("exit_code"),
             }
             if result.get("image_url"):

@@ -142,6 +142,29 @@ async def test_api_call_rejects_path_fragment_without_requesting():
 
 
 @pytest.mark.asyncio
+async def test_fat_object_list_uses_compact_summary():
+    """Fat catalog rows (e.g. TrueNAS apps) should summarize all names, not 1 blob."""
+    fat_apps = [
+        {
+            "name": f"app_{i}",
+            "id": f"app_{i}",
+            "state": "RUNNING" if i % 2 == 0 else "STOPPED",
+            "metadata": {"capabilities": [{"name": "CHOWN", "description": "x" * 200}]},
+        }
+        for i in range(27)
+    ]
+
+    result = await _call(fat_apps)
+
+    assert result.get("exit_code") == 0
+    body = result["output"].split("\n", 1)[1]
+    assert body.startswith("27 items:")
+    assert body.count("- app_") == 27
+    assert "app_0 — RUNNING" in body
+    assert "_truncated" not in body
+
+
+@pytest.mark.asyncio
 async def test_large_json_list_returns_valid_json_with_sentinel():
     """A JSON list whose serialized form exceeds 12000 chars must be truncated
     to a valid JSON array ending with a sentinel object, not mid-string cut."""

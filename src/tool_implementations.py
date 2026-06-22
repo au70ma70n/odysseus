@@ -1358,13 +1358,22 @@ async def do_api_call(content: str) -> Dict:
             except json.JSONDecodeError:
                 pass
 
-    integration_name = args.get("integration", "")
+    # Models often emit integration_id / id / name instead of integration.
+    integration_name = ""
+    for key in ("integration", "integration_id", "integration_name", "name", "id"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            integration_name = val.strip()
+            break
     integrations = load_integrations()
     intg = next((i for i in integrations if i["id"] == integration_name
                  or i["name"].lower() == integration_name.lower()), None)
     if not intg:
         available = ", ".join(i["name"] for i in integrations if i.get("enabled", True))
-        return {"error": f"No integration matching '{integration_name}'. Available: {available or 'none configured'}", "exit_code": 1}
+        hint = ""
+        if not integration_name and any(k in args for k in ("integration_id", "id")):
+            hint = " Use the `integration` field (name or id), e.g. {\"integration\": \"TrueNAS Scale\", ...}."
+        return {"error": f"No integration matching '{integration_name}'. Available: {available or 'none configured'}.{hint}", "exit_code": 1}
 
     return await execute_api_call(
         intg["id"],

@@ -177,3 +177,15 @@ def test_update_integration_rejects_invalid_base_url_without_changing_existing(
     assert exc.value.status_code == 400
     assert exc.value.detail == message
     assert integrations.load_integrations()[0]["base_url"] == "https://example.test"
+
+
+def test_integration_tls_verify_defaults_true_and_honors_opt_out():
+    assert integrations.integration_tls_verify({}) is True
+    assert integrations.integration_tls_verify({"verify_ssl": True}) is True
+    assert integrations.integration_tls_verify({"verify_ssl": False}) is False
+
+
+def test_integration_health_path_detects_truenas():
+    assert integrations.integration_health_path({"name": "TrueNAS Scale"}) == "/api/v2.0/system/info"
+    assert integrations.integration_health_path({"preset": "truenas"}) == "/api/v2.0/system/info"
+    assert integrations.integration_health_path({"name": "Other"}) == "/"

@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js';
+import chatRenderer, { formatToolOutputHtml } from './chatRenderer.js';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -1149,6 +1149,26 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _liveThinkTokenCount = 0;
       let _liveThinkToggle = null;
       let _liveThinkDomId = null;
+      let _streamRenderRaf = 0;
+      let _lastThinkMdRender = 0;
+      let _thinkMdTimer = null;
+      let _thinkTimerInterval = 0;
+
+      function _flushStreamRender() {
+        if (_streamRenderRaf) {
+          cancelAnimationFrame(_streamRenderRaf);
+          _streamRenderRaf = 0;
+        }
+        _renderStream();
+      }
+
+      function _scheduleStreamRender() {
+        if (_streamRenderRaf) return;
+        _streamRenderRaf = requestAnimationFrame(() => {
+          _streamRenderRaf = 0;
+          _renderStream();
+        });
+      }
 
       function _estimateThinkingTokens(text) {
         const clean = (text || '').trim();
@@ -1255,7 +1275,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // See streamingRenderer.js / streamingSegmenter.js.
         const renderer = contentEl._streamRenderer ||
           (contentEl._streamRenderer = createStreamRenderer(contentEl, {
-            render: (t) => markdownModule.processWithThinking(markdownModule.squashOutsideCode(t)),
+            // Lighter than processWithThinking during stream; final render still
+            // runs the full pipeline when the round completes.
+            render: (t) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(t)),
             hljs: window.hljs,
           }));
         renderer.update(dt);
@@ -1342,7 +1364,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               // Force-close thinking if still open (model never output boundary)
               if (isThinking) {
                 isThinking = false;
-                cancelAnimationFrame(_thinkTimerRAF);
+                if (_thinkTimerInterval) { clearInterval(_thinkTimerInterval); _thinkTimerInterval = 0; }
+                if (_thinkMdTimer) { clearTimeout(_thinkMdTimer); _thinkMdTimer = null; }
                 var _elapsedDone = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
                 if (_elapsedDone) {
                   accumulated = accumulated.replace(/<think>/i, '<think time="' + _elapsedDone + '">');
@@ -1551,11 +1574,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _liveThinkSpinnerSlot = thinkContent.querySelector('.live-think-spinner-slot');
                   _liveThinkTimerEl = thinkContent.querySelector('.live-think-timer');
                   _liveThinkToggle = thinkContent.querySelector('.live-think-toggle');
-                  // Live timer
+                  // Live timer — once per second is enough; RAF every frame was costly.
                   var _thinkTimerStart = Date.now();
-                  var _thinkTimerRAF = 0;
-                  function _tickThinkTimer() {
-                    if (!_liveThinkTimerEl || !_liveThinkTimerEl.isConnected) return;
+                  _thinkTimerInterval = setInterval(() => {
+                    if (!_liveThinkTimerEl || !_liveThinkTimerEl.isConnected) {
+                      clearInterval(_thinkTimerInterval);
+                      _thinkTimerInterval = 0;
+                      return;
+                    }
                     var s = ((Date.now() - _thinkTimerStart) / 1000).toFixed(1);
                     _liveThinkTimerEl.textContent = _formatThinkStats(s, _liveThinkTokenCount);
                     _thinkTimerRAF = requestAnimationFrame(_tickThinkTimer);
@@ -1580,16 +1606,28 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       .replace(/<channel\|>/gi, '');
                     thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
                     _liveThinkTokenCount = _estimateThinkingTokens(thinkText);
-                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
                     if (_liveThinkTimerEl) {
                       var _elapsedLive = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : '';
                       _liveThinkTimerEl.textContent = _formatThinkStats(_elapsedLive, _liveThinkTokenCount);
                     }
-                    // Keep thinking box scrolled to bottom, but let user scroll up
-                    var thinkBox = _liveThinkInner.closest('.thinking-content');
-                    if (thinkBox) {
-                      var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
-                      if (nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
+                    const _renderThink = () => {
+                      _lastThinkMdRender = Date.now();
+                      _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
+                      var thinkBox = _liveThinkInner.closest('.thinking-content');
+                      if (thinkBox) {
+                        var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
+                        if (nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
+                      }
+                    };
+                    const _now = Date.now();
+                    if (_now - _lastThinkMdRender >= 150) {
+                      if (_thinkMdTimer) { clearTimeout(_thinkMdTimer); _thinkMdTimer = null; }
+                      _renderThink();
+                    } else if (!_thinkMdTimer) {
+                      _thinkMdTimer = setTimeout(() => {
+                        _thinkMdTimer = null;
+                        _renderThink();
+                      }, 150 - (_now - _lastThinkMdRender));
                     }
                   }
                   uiModule.scrollHistory();
@@ -1613,14 +1651,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     _liveThinkDomId = null;
                     // Fall through to normal streaming
                     if (spinner && spinner.element) spinner.destroy();
-                    _renderStream();
+                    _flushStreamRender();
                     _scheduleThinkingSpinner();
                     continue;
                   }
 
                   // Thinking ended — smooth transition: update header, pause, then collapse
                   // Stop live timer and spinner
-                  cancelAnimationFrame(_thinkTimerRAF);
+                  if (_thinkTimerInterval) { clearInterval(_thinkTimerInterval); _thinkTimerInterval = 0; }
+                  if (_thinkMdTimer) { clearTimeout(_thinkMdTimer); _thinkMdTimer = null; }
                   var elapsed = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
                   // Embed thinking time in the <think> tag for persistence on reload
                   if (elapsed) {
@@ -1661,11 +1700,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   }
 
                   // Render any reply text that arrived with the closing </think> token
-                  _renderStream();
+                  _flushStreamRender();
                 } else {
                   // Normal streaming
                   if (spinner && spinner.element) spinner.destroy();
-                  _renderStream();
+                  _scheduleStreamRender();
                   _scheduleThinkingSpinner();
                   // Feed streaming TTS with accumulated text
                   if (streamingTTS) window.aiTTSManager.streamingUpdate(roundText);
@@ -2029,7 +2068,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Force-close thinking if still open — tools are real content, not thinking
                 if (isThinking) {
                   isThinking = false;
-                  cancelAnimationFrame(_thinkTimerRAF);
+                  if (_thinkTimerInterval) { clearInterval(_thinkTimerInterval); _thinkTimerInterval = 0; }
+                  if (_thinkMdTimer) { clearTimeout(_thinkMdTimer); _thinkMdTimer = null; }
                   var _elapsed2 = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
                   if (_liveThinkHeader) _liveThinkHeader.textContent = 'View thinking process';
                   if (_liveThinkTimerEl) _liveThinkTimerEl.textContent = _elapsed2 ? _formatThinkStats(_elapsed2, _liveThinkTokenCount) : '';
@@ -2041,7 +2081,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (_liveThinkContent) _liveThinkContent.id = _thinkId2;
                   if (_liveThinkToggle) _liveThinkToggle.id = _thinkId2 + '-toggle';
                 }
-                _renderStream();
+                _flushStreamRender();
                 // --- Finalize current text bubble (only once per round) ---
                 if (!roundFinalized) {
                   roundFinalized = true;
@@ -2051,8 +2091,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     var _body3 = roundHolder.querySelector('.body');
                     var _contentEl3 = _ensureStreamLayout(_body3);
                     _contentEl3.style.minHeight = '';  // clear streaming inflate
-                    _contentEl3.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(dt));
-                    if (window.hljs) roundHolder.querySelectorAll('pre code').forEach((b) => window.hljs.highlightElement(b));
+                    const _streamRenderer = _contentEl3._streamRenderer;
+                    if (_streamRenderer && typeof _streamRenderer.finalize === 'function') {
+                      _streamRenderer.finalize();
+                    } else {
+                      _contentEl3.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(dt));
+                      if (window.hljs) roundHolder.querySelectorAll('pre code').forEach((b) => window.hljs.highlightElement(b));
+                    }
                   } else {
                     roundHolder.style.display = 'none';
                   }
@@ -2114,9 +2159,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     waveEl.textContent = waveFrames[waveIdx];
                   }, 100);
                 }
-                // Smooth per-second "cooking" timer — ticks every second (not
-                // just on the 2s backend heartbeat) so a long-running tool
-                // always shows visible motion and never reads as frozen.
+                // Smooth per-second elapsed timer for long-running tools.
                 node._startTime = Date.now();
                 node._elapsedTicker = setInterval(() => {
                   const hdr2 = node.querySelector('.agent-thread-header');
@@ -2125,15 +2168,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (!el2) {
                     el2 = document.createElement('span');
                     el2.className = 'agent-thread-elapsed';
-                    // Sits on the LEFT, right after the icon.
                     const icon = hdr2.querySelector('.agent-thread-icon');
                     if (icon && icon.nextSibling) hdr2.insertBefore(el2, icon.nextSibling);
                     else hdr2.appendChild(el2);
                   }
                   const s = (Date.now() - node._startTime) / 1000;
-                  // Hundredths so it visibly counts sub-second (1.00, 1.05, …).
-                  el2.textContent = s < 60 ? `${s.toFixed(2)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(2).padStart(5, '0')}s`;
-                }, 50);
+                  el2.textContent = s < 60 ? `${Math.floor(s)}s` : `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+                }, 1000);
                 uiModule.scrollHistory();
 
               } else if (json.type === 'tool_progress') {
@@ -2177,7 +2218,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   const cmd = json.command || '';
                   let outHtml = '';
                   if (json.output && json.output.trim()) {
-                    outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
+                    outHtml = formatToolOutputHtml(json.output, esc);
                   }
                   // File-write diff (write_file): show a before/after unified diff.
                   let diffHtml = '';
@@ -2256,8 +2297,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // so a batch of event creates only triggers one refetch.
                 if (json.tool === 'manage_calendar') {
                   if (window._manageCalTimer) clearTimeout(window._manageCalTimer);
-                  window._manageCalTimer = setTimeout(
-                    () => window.dispatchEvent(new CustomEvent('calendar-refresh')), 600);
+                  window._manageCalTimer = setTimeout(() => {
+                    if (window.calendarModule && window.calendarModule.isCalendarOpen && window.calendarModule.isCalendarOpen()) {
+                      window.dispatchEvent(new CustomEvent('calendar-refresh'));
+                    }
+                  }, 600);
                 }
                 // --- Live-refresh Memories after manage_memory changes ---
                 if (json.tool === 'manage_memory') {
@@ -2337,7 +2381,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (_isBg) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
-                _renderStream();
+                _flushStreamRender();
                 // Mark thread as connected to bubble below
                 const _activeThread = document.querySelector('.agent-thread.streaming');
                 if (_activeThread) {
@@ -2452,7 +2496,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         throw new Error('Stream closed before completion');
       }
 
-      _renderStream();
+      _flushStreamRender();
       _cancelThinkingTimer();
       _removeThinkingSpinner();
       // Stop any thread pulse animations
@@ -3460,17 +3504,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   (function _initCompactPreObserver() {
     if (window._cmpPreObserverWired) return;
     window._cmpPreObserverWired = true;
-    _scanCompactPres(document.body);
+    const root = document.getElementById('chat-history') || document.body;
+    _scanCompactPres(root);
     const obs = new MutationObserver((muts) => {
       for (const m of muts) {
         for (const n of m.addedNodes) {
           if (n.nodeType !== 1) continue;
           if (n.tagName === 'PRE') _markCompactPre(n);
-          if (n.querySelectorAll) _scanCompactPres(n);
+          else if (n.querySelectorAll) n.querySelectorAll('pre').forEach(_markCompactPre);
         }
       }
     });
-    obs.observe(document.body, { childList: true, subtree: true });
+    obs.observe(root, { childList: true, subtree: true });
   })();
 
   /**

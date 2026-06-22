@@ -31,6 +31,8 @@ from src.integrations import (
     get_integration,
     mask_integration_secret,
     execute_api_call,
+    integration_health_path,
+    integration_tls_verify,
     INTEGRATION_PRESETS,
     migrate_from_settings,
 )
@@ -770,7 +772,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 elif auth_type == "header":
                     headers[integ.get("auth_header") or "Authorization"] = api_key
             try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
+                verify = integration_tls_verify(integ)
+                async with httpx.AsyncClient(timeout=8.0, verify=verify) as client:
                     r = await client.post(
                         full_url,
                         content="Connectivity test from Odysseus. If you see this on your phone, ntfy is wired up correctly.",
@@ -810,7 +813,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 }]
             }
             try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
+                verify = integration_tls_verify(integ)
+                async with httpx.AsyncClient(timeout=8.0, verify=verify) as client:
                     r = await client.post(webhook_url, json=payload)
                 if r.is_success:
                     return {"ok": True, "message": "Test embed sent — check your Discord channel to confirm it arrived."}
@@ -818,16 +822,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             except Exception as e:
                 return {"ok": False, "message": f"Request failed: {e}"[:400]}
 
-        # All other presets: GET against a known health endpoint.
-        # Fall back to detecting from name if preset is missing.
-        health_paths = {
-            "miniflux": "/v1/me",
-            "gitea": "/api/v1/version",
-            "linkding": "/api/tags/",
-            "homeassistant": "/api/",
-            "home assistant": "/api/",
-        }
-        path = health_paths.get(preset, "/")
+        path = integration_health_path(integ)
         result = await execute_api_call(integration_id, "GET", path)
         if result.get("exit_code", 1) == 0:
             return {"ok": True, "message": "Connection successful"}

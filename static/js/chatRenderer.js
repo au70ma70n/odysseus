@@ -27,6 +27,23 @@ function _safeHref(url) {
   return '#';
 }
 
+/** Cap tool output painted in the DOM — full text can be 10k/tool × many searches. */
+const MAX_UI_TOOL_OUTPUT_CHARS = 2500;
+
+/** Collapsible tool output with a display cap so short chats still load fast. */
+export function formatToolOutputHtml(output, esc) {
+  const raw = String(output || '').trim();
+  if (!raw) return '';
+  const escFn = typeof esc === 'function' ? esc : (s) => s;
+  let body = raw;
+  let summary = 'Output';
+  if (raw.length > MAX_UI_TOOL_OUTPUT_CHARS) {
+    body = raw.slice(0, MAX_UI_TOOL_OUTPUT_CHARS);
+    summary = `Output (${raw.length.toLocaleString()} chars, showing first ${MAX_UI_TOOL_OUTPUT_CHARS.toLocaleString()})`;
+  }
+  return `<details class="agent-tool-output"><summary>${escFn(summary)}</summary><pre>${escFn(body)}</pre></details>`;
+}
+
 export function safeToolScreenshotSrc(raw) {
   const src = String(raw || '').trim();
   if (/^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(src)) {
@@ -2249,7 +2266,7 @@ export function addMessage(role, content, modelName, metadata) {
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
-              outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
+              outHtml = formatToolOutputHtml(ev.output, esc);
             }
             const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
             if (screenshotSrc) {
@@ -2649,6 +2666,7 @@ const chatRenderer = {
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,
+  formatToolOutputHtml,
   buildSourcesBox,
   buildFindingsBox,
   appendReportButton,
