@@ -21,6 +21,7 @@ from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, ToolPolicy
+from src.repetition_detector import RepetitionCollapseDetector
 from src.constants import UI_METADATA_OUTPUT_CHARS
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
@@ -274,6 +275,7 @@ _DOMAIN_RULES = {
 - Example: `{"integration": "TrueNAS Scale", "method": "GET", "path": "/api/v2.0/app"}` — the field MUST be `integration`, not `integration_id` or `id`.
 - TrueNAS writes (deploy/start/delete apps) return a **job id** — poll `GET /api/v2.0/core/get_jobs?id=<id>` until `state` is SUCCESS or FAILED before telling the user the result.
 - ComfyUI is not in the TrueNAS catalog. Load skill `deploy-comfyui-truenas` and deploy as `custom_app` via `POST /api/v2.0/app`.
+- TrueNAS app logs: `GET /api/v2.0/app/container_logs?app_name=<name>&tail_lines=100` (not `/api/v2.0/log` — that 404s).
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
 }
 
@@ -1883,6 +1885,63 @@ def _empty_response_fallback(
     return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
 
 
+_THINK_RE_MODULE = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
+
+_PROSELESS_MIN_TOOL_EVENTS = 2
+
+
+def _has_meaningful_prose(round_texts: list) -> bool:
+    """True if the agent produced at least one round with real user-facing text.
+
+    "Real" means more than just tool fences, ``<think>`` blocks, or whitespace.
+    A single substantive sentence anywhere across all rounds counts — we only
+    want to catch the pattern where *every* round was pure tool-call output.
+    """
+    for rt in round_texts:
+        cleaned = _THINK_RE_MODULE.sub("", rt or "").strip()
+        if cleaned:
+            return True
+    return False
+
+
+async def _proseless_agent_synthesis(
+    messages: list,
+    endpoint_url: str,
+    model: str,
+    headers: dict | None,
+    max_tokens: int,
+) -> str:
+    """Run a one-shot synthesis call to produce an answer from gathered tool results.
+
+    Used when the agent ran tools across multiple rounds but never wrote any
+    prose for the user. The conversation ``messages`` already contain every
+    tool result, so a single non-tool call is usually enough.
+
+    Returns the synthesized text (may be empty on failure).
+    """
+    from src.llm_core import llm_call_async
+
+    synth_messages = list(messages) + [{
+        "role": "user",
+        "content": (
+            "You just executed tool calls and have all the results above, but "
+            "you never wrote a summary for the user. Using ONLY the information "
+            "already gathered above, write the final answer now. Do NOT call any "
+            "tools. If some data couldn't be fetched, note what's missing in one "
+            "short line. Be concise and helpful."
+        ),
+    }]
+    try:
+        raw = await llm_call_async(
+            url=endpoint_url, model=model, messages=synth_messages,
+            headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=90,
+        )
+        return _THINK_RE_MODULE.sub("", strip_tool_blocks(raw or "")).strip()
+    except Exception as e:
+        logger.warning("[agent] proseless synthesis failed: %s", e)
+        return ""
+
+
 PLAN_MODE_DIRECTIVE = (
     "## PLAN MODE — OVERRIDES EVERYTHING ELSE BELOW\n"
     "You are in PLAN MODE. Your ONLY job this turn is to PROPOSE a plan. You have "
@@ -2511,6 +2570,7 @@ async def stream_agent_loop(
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+        _rep_detector = RepetitionCollapseDetector()
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -2640,6 +2700,21 @@ async def stream_agent_loop(
                         # Stream document content to frontend as AI generates it
                         logger.debug(f"tool_call_delta: name={data.get('name')}, len(arg_delta)={len(data.get('arg_delta', ''))}")
                         _doc_acc += data.get("arg_delta", "")
+                        if _rep_detector.feed(data.get("arg_delta", "")):
+                            _rep_warn = (
+                                f"\n\n*[Generation aborted: repetition collapse detected "
+                                f"in tool arguments (repeated \"{_rep_detector.trigger_phrase}\"). "
+                                f"This is a known model bug — see "
+                                f"[gemma#622](https://github.com/google-deepmind/gemma/issues/622). "
+                                f"Try rephrasing your request or switching models.]*"
+                            )
+                            logger.warning(
+                                "[agent] round %d: repetition collapse in tool_call_delta on %r",
+                                round_num, _rep_detector.trigger_phrase,
+                            )
+                            yield f'data: {json.dumps({"delta": _rep_warn})}\n\n'
+                            full_response += _rep_warn
+                            break
                         if not _doc_opened:
                             tm = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
                             if tm:
@@ -2725,6 +2800,21 @@ async def stream_agent_loop(
                         else:
                             round_response += data["delta"]
                             full_response += data["delta"]
+                            if _rep_detector.feed(data["delta"]):
+                                _rep_warn = (
+                                    f"\n\n*[Generation aborted: repetition collapse detected "
+                                    f"(repeated \"{_rep_detector.trigger_phrase}\"). "
+                                    f"This is a known model bug — see "
+                                    f"[gemma#622](https://github.com/google-deepmind/gemma/issues/622). "
+                                    f"Try rephrasing your request or switching models.]*"
+                                )
+                                logger.warning(
+                                    "[agent] round %d: repetition collapse on %r — aborting stream",
+                                    round_num, _rep_detector.trigger_phrase,
+                                )
+                                yield f'data: {json.dumps({"delta": _rep_warn})}\n\n'
+                                full_response += _rep_warn
+                                break
                         yield chunk  # Stream all rounds
                         # Detect text-fence doc streaming for rounds 2+
                         # (round 1 is handled by frontend fence detection + server fenced block path)
@@ -2799,6 +2889,12 @@ async def stream_agent_loop(
             round_num,
             is_api_model=(_is_api_model and not guide_only),
         )
+
+        # Repetition collapse: discard any tool blocks from the degenerate
+        # output and end the agent loop — don't burn more rounds.
+        if _rep_detector.collapsed:
+            tool_blocks = []
+            break
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
@@ -3450,6 +3546,41 @@ async def stream_agent_loop(
     if _exhausted_rounds:
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
         yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+
+    # ── Proseless synthesis guard ─────────────────────────────────────
+    # The model ran tools but never wrote a user-facing answer across any
+    # round (every round_texts entry is empty / think-only). This is the
+    # single most frustrating UX failure: the user sees a wall of tool
+    # blocks and then… nothing.  Run one synthesis call to salvage an
+    # answer from the gathered context, identical to the loop-breaker's
+    # grace synthesis but triggered by the *absence of prose* rather than
+    # by repeated identical calls.
+    if (
+        tool_events
+        and len(tool_events) >= _PROSELESS_MIN_TOOL_EVENTS
+        and not _has_meaningful_prose(round_texts)
+        and not _force_answer  # loop-breaker already tried synthesis
+    ):
+        logger.info(
+            "[agent] proseless turn detected: %d tool events, 0 prose — running synthesis",
+            len(tool_events),
+        )
+        _synth = await _proseless_agent_synthesis(
+            messages, endpoint_url, model, headers, max_tokens,
+        )
+        if _synth:
+            yield f'data: {json.dumps({"delta": _synth})}\n\n'
+            full_response += _synth
+            round_texts.append(_synth)
+        else:
+            _fb = (
+                "I ran several tool calls but wasn't able to pull a clear "
+                "answer together from the results. Want me to try again with "
+                "a more specific approach?"
+            )
+            yield f'data: {json.dumps({"delta": _fb})}\n\n'
+            full_response += _fb
+            round_texts.append(_fb)
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.

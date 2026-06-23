@@ -27,6 +27,45 @@ from .cache import (
 
 logger = logging.getLogger(__name__)
 
+# Homelab opt-in: allow web_fetch / deep-research page fetches to RFC1918,
+# .lan, Tailscale CGNAT, etc. Cloud metadata endpoints stay blocked.
+_ALWAYS_BLOCKED_HOSTS = frozenset({"metadata", "metadata.google.internal"})
+_ALWAYS_BLOCKED_NETWORKS = (
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local / cloud metadata
+)
+
+
+def _private_web_fetch_allowed() -> bool:
+    return os.environ.get("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", "0").lower() in {
+        "1", "true", "yes",
+    }
+
+
+def _web_fetch_insecure_tls() -> bool:
+    """When true, skip TLS certificate verification (self-signed LAN HTTPS)."""
+    return os.environ.get("ODYSSEUS_WEB_FETCH_INSECURE_TLS", "0").lower() in {
+        "1", "true", "yes",
+    }
+
+
+def _always_blocked_fetch_target(host: str, addrs: list | None = None) -> bool:
+    """SSRF targets that stay blocked even when private web_fetch is allowed."""
+    lower = (host or "").strip().lower()
+    if lower in _ALWAYS_BLOCKED_HOSTS:
+        return True
+    candidates: list[ipaddress._BaseAddress] = list(addrs or [])
+    try:
+        candidates.append(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    for addr in candidates:
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+        if any(addr in net for net in _ALWAYS_BLOCKED_NETWORKS):
+            return True
+    return False
+
+
 _PRIVATE_NETWORKS = (
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -76,6 +115,11 @@ def _public_http_url(url: str) -> bool:
         host = (parsed.hostname or "").strip()
         if not host:
             return False
+        addrs = _resolve_hostname_ips(host)
+        if _always_blocked_fetch_target(host, addrs):
+            return False
+        if _private_web_fetch_allowed():
+            return True
         lower = host.lower()
         if lower in ("localhost", "metadata", "metadata.google.internal"):
             return False
@@ -85,7 +129,6 @@ def _public_http_url(url: str) -> bool:
             return not _is_private_address(ipaddress.ip_address(host))
         except ValueError:
             pass
-        addrs = _resolve_hostname_ips(host)
         return bool(addrs) and not any(_is_private_address(a) for a in addrs)
     except Exception:
         return False
@@ -152,7 +195,11 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
     current = url
     for _ in range(max_redirects + 1):
         if not _public_http_url(current):
-            raise httpx.RequestError("Blocked private/internal URL", request=httpx.Request("GET", current))
+            raise httpx.RequestError(
+                "Blocked private/internal URL "
+                "(set ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH=1 for homelab)",
+                request=httpx.Request("GET", current),
+            )
         # Force identity transfer-encoding. With gzip/deflate the wire bytes
         # (and Content-Length) can be a small fraction of the decoded body, so
         # a tiny compressed response could pass the hard-cap preflight and then
@@ -161,8 +208,9 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
         # size and keeps each streamed chunk bounded by the network read.
         req_headers = dict(headers or {})
         req_headers["Accept-Encoding"] = "identity"
+        verify_tls = not _web_fetch_insecure_tls()
         with httpx.stream("GET", current, headers=req_headers, timeout=timeout,
-                          follow_redirects=False) as response:
+                          follow_redirects=False, verify=verify_tls) as response:
             if response.status_code in (301, 302, 303, 307, 308):
                 location = response.headers.get("location")
                 if not location:

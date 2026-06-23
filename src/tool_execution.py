@@ -928,7 +928,13 @@ async def _execute_tool_block_impl(
                 if tool.startswith("mcp__email__") and owner:
                     args = dict(args)
                     args[_EMAIL_MCP_OWNER_ARG] = owner
-                result = await mcp.call_tool(tool, args)
+                from src.comfyui_mcp import comfyui_generate_and_deliver, is_comfyui_generation_tool
+                if is_comfyui_generation_tool(tool):
+                    result = await comfyui_generate_and_deliver(mcp, tool, args)
+                else:
+                    result = await mcp.call_tool(tool, args)
+                if result.get("image_url"):
+                    _promote_image_fields(result)
         else:
             desc = f"mcp: {tool}"
             result = {"error": "MCP manager not available", "exit_code": 1}

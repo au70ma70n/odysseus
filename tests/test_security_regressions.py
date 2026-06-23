@@ -814,6 +814,7 @@ def _load_search_content_for_test(monkeypatch, name="services.search.content_und
 def test_web_content_fetcher_blocks_private_url(monkeypatch):
     content = _load_search_content_for_test(monkeypatch)
 
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
     monkeypatch.setattr(content, "_resolve_hostname_ips", lambda host: [])
 
     assert content._public_http_url("http://127.0.0.1:8000/") is False
@@ -826,6 +827,7 @@ def test_web_content_fetcher_blocks_dns_to_private(monkeypatch):
 
     content = _load_search_content_for_test(monkeypatch, "services.search.content_under_test_dns")
 
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
     monkeypatch.setattr(content, "_resolve_hostname_ips", lambda host: [ipaddress.ip_address("10.0.0.5")])
 
     assert content._public_http_url("https://example.test/path") is False
@@ -858,17 +860,34 @@ import pytest as _pytest
     "http://10.0.0.5/",                   # private LAN 10/8
     "http://172.16.0.1/",                 # private LAN 172.16/12
     "http://192.168.1.1/",                # private LAN 192.168/16
-    "http://169.254.169.254/latest/",     # link-local / cloud metadata
-    "http://metadata.google.internal/",   # metadata by name
     "http://[::1]/",                      # IPv6 loopback
     "http://[fc00::1]/",                  # IPv6 unique-local (ULA)
     "http://[fe80::1]/",                  # IPv6 link-local
+])
+def test_web_fetch_guard_blocks_private_when_opt_in_off(url, monkeypatch):
+    from src.search.content import _public_http_url
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
+    assert _public_http_url(url) is False
+
+
+@_pytest.mark.parametrize("url", [
+    "http://169.254.169.254/latest/",     # link-local / cloud metadata
+    "http://metadata.google.internal/",   # metadata by name
     "file:///etc/passwd",                 # unsupported scheme
     "ftp://example.com/",                 # unsupported scheme
 ])
-def test_web_fetch_guard_blocks_private_and_bad_schemes(url):
+def test_web_fetch_guard_blocks_metadata_and_bad_schemes_even_when_opt_in_on(url, monkeypatch):
     from src.search.content import _public_http_url
+    monkeypatch.setenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", "1")
     assert _public_http_url(url) is False
+
+
+def test_web_fetch_guard_allows_private_when_opt_in_on(monkeypatch):
+    from src.search.content import _public_http_url
+    monkeypatch.setenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", "1")
+    assert _public_http_url("https://server.lan:444/api/docs/") is True
+    assert _public_http_url("http://10.0.0.11/") is True
+    assert _public_http_url("http://nas.lan/") is True
 
 
 def test_web_fetch_guard_allows_public_ip():
@@ -878,6 +897,7 @@ def test_web_fetch_guard_allows_public_ip():
 
 def test_web_fetch_guard_blocks_dns_resolving_to_private(monkeypatch):
     from src.search import content
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
     monkeypatch.setattr(content, "_resolve_hostname_ips",
                         lambda host: [_ipaddr.ip_address("10.0.0.5")])
     assert content._public_http_url("https://innocent.example/") is False
@@ -886,6 +906,7 @@ def test_web_fetch_guard_blocks_dns_resolving_to_private(monkeypatch):
 def test_web_fetch_guard_fails_closed_on_empty_resolution(monkeypatch):
     # A hostname that resolves to nothing must be treated as non-public.
     from src.search import content
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
     monkeypatch.setattr(content, "_resolve_hostname_ips", lambda host: [])
     assert content._public_http_url("https://innocent.example/") is False
 

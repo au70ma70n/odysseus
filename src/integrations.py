@@ -80,19 +80,23 @@ INTEGRATION_PRESETS: Dict[str, Dict[str, Any]] = {
         "name": "TrueNAS",
         "auth_type": "bearer",
         "description": (
-            "TrueNAS SCALE API (v2 REST wrapper + jobs). Auth: Bearer API key.\n"
+            "TrueNAS SCALE API. Prefer WebSocket JSON-RPC on /api/current (see docs/followups/truenas-websocket-api-migration.md). "
+            "Current api_call paths still use the legacy REST wrapper until migration.\n"
             "Read endpoints:\n"
             "  GET /api/v2.0/system/info — version, hostname\n"
             "  GET /api/v2.0/app — installed apps (name + state)\n"
-            "  GET /api/v2.0/app/id/{name} — one app details\n"
+            "  GET /api/v2.0/app/id/{name} — one app details (state, container id, mounts)\n"
+            "  GET /api/v2.0/app/container_logs?app_name={name}&tail_lines=100 — container logs\n"
+            "    (WebSocket under the hood; optional container_id from app/id response)\n"
             "  GET /api/v2.0/app/available — catalog app names (ComfyUI is NOT listed)\n"
             "  GET /api/v2.0/app/used_ports — ports already taken\n"
             "  GET /api/v2.0/app/gpu_choices — NVIDIA GPUs for GPU apps\n"
             "  GET /api/v2.0/pool/dataset — datasets (use /mnt/{pool}/... in compose volumes)\n"
-            "  GET /api/v2.0/core/get_jobs?id={job_id} — poll async jobs\n"
-            "Write endpoints (return job id number — poll get_jobs until SUCCESS):\n"
-            "  POST /api/v2.0/app — app.create (body: app_name, custom_app, custom_compose_config_string)\n"
-            "  POST /api/v2.0/app/start — body {\"id\": \"appname\"}\n"
+            "  GET /api/v2.0/core/get_jobs?id={job_id} — poll ONE async job (filtered client-side)\n"
+            "Write endpoints (return job id number — poll get_jobs?id=<id> until state is SUCCESS or FAILED):\n"
+            "  POST /api/v2.0/app — app.create. ONLY body format: {\"app_name\": \"name\", \"custom_app\": true, \"custom_compose_config_string\": \"services:\\n  ...yaml...\"}\n"
+            "    Do NOT send Docker API fields (image, ports, volumes, device_requests) — TrueNAS rejects them.\n"
+            "  POST /api/v2.0/app/start — body is a JSON string: \"appname\" (not an object; not query params)\n"
             "  POST /api/v2.0/app/redeploy — body {\"app_name\": \"appname\"}\n"
             "  DELETE /api/v2.0/app/id/{name} — remove app\n"
             "ComfyUI: custom app only. Load skill deploy-comfyui-truenas before deploying."
@@ -527,6 +531,88 @@ async def execute_api_call(
         return {"error": "Path must start with /", "exit_code": 1}
     if re.search(r"^https?://", path) or "://" in path:
         return {"error": "Path must not contain a protocol scheme", "exit_code": 1}
+
+    # TrueNAS container logs are WebSocket-only on 25.x; expose them through a
+    # virtual REST path so api_call can fetch logs without bash/docker.
+    from src.truenas_ws import is_truenas_integration, fetch_app_container_logs
+    if (
+        is_truenas_integration(integration)
+        and method == "GET"
+        and path.rstrip("/") == "/api/v2.0/app/container_logs"
+    ):
+        args = dict(params or {})
+        if isinstance(body, dict):
+            args.update(body)
+        app_name = (args.get("app_name") or args.get("name") or "").strip()
+        if not app_name:
+            return {
+                "error": "Missing app_name query param for /api/v2.0/app/container_logs",
+                "exit_code": 1,
+            }
+        tail_lines = args.get("tail_lines") or args.get("tail") or 100
+        try:
+            tail_lines = max(1, min(2000, int(tail_lines)))
+        except (TypeError, ValueError):
+            tail_lines = 100
+        container_id = args.get("container_id")
+        try:
+            logs = await fetch_app_container_logs(
+                base_url,
+                integration.get("api_key", ""),
+                app_name=app_name,
+                container_id=str(container_id).strip() if container_id else None,
+                tail_lines=tail_lines,
+                verify_ssl=integration_tls_verify(integration),
+            )
+        except Exception as exc:
+            log.warning("TrueNAS container log fetch failed: %s", exc)
+            return {"error": f"TrueNAS container logs failed: {exc}", "exit_code": 1}
+        if len(logs) > _AGENT_JSON_LIMIT:
+            total = len(logs)
+            logs = logs[:_AGENT_JSON_LIMIT] + f"\n... (truncated, {total} chars total)"
+        return {"output": f"HTTP 200\n{logs}", "exit_code": 0}
+
+    # TrueNAS core/get_jobs returns ALL jobs (ignores ?id= query param).
+    # Intercept and filter client-side so the agent can poll a single job.
+    if (
+        is_truenas_integration(integration)
+        and method == "GET"
+        and path.rstrip("/") == "/api/v2.0/core/get_jobs"
+    ):
+        job_id = None
+        lookup = dict(params or {})
+        if isinstance(body, dict):
+            lookup.update(body)
+        for key in ("id", "job_id"):
+            val = lookup.get(key)
+            if val is not None:
+                try:
+                    job_id = int(val)
+                except (TypeError, ValueError):
+                    pass
+                break
+        if job_id is not None:
+            verify = integration_tls_verify(integration)
+            _url = _join_integration_url(base_url, path)
+            _headers: dict = {}
+            api_key = integration.get("api_key", "")
+            auth_type = integration.get("auth_type", "none")
+            if auth_type == "bearer" and api_key:
+                _headers["Authorization"] = f"Bearer {api_key}"
+            try:
+                async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+                    resp = await client.get(_url, headers=_headers)
+                all_jobs = resp.json() if resp.status_code == 200 else []
+            except Exception as exc:
+                return {"error": f"TrueNAS get_jobs failed: {exc}", "exit_code": 1}
+            matched = [j for j in all_jobs if isinstance(j, dict) and j.get("id") == job_id]
+            if not matched:
+                return {"output": f"HTTP 200\nJob {job_id} not found in {len(all_jobs)} jobs.", "exit_code": 0}
+            job = matched[0]
+            formatted = json.dumps(job, indent=2, default=str)
+            if len(formatted) > _AGENT_JSON_LIMIT:
+                formatted = formatted[:_AGENT_JSON_LIMIT] + "\n... (truncated)"
+            return {"output": f"HTTP 200\n{formatted}", "exit_code": 0}
 
     if "#" in path:
         return {"error": "Path must not contain a fragment", "exit_code": 1}

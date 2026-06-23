@@ -2549,6 +2549,21 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "path is required (e.g. '/api/cookbook/gpus')", "exit_code": 1}
     if not path.startswith("/"):
         path = "/" + path
+
+    # Catch the common model confusion: agent sends integration-style paths
+    # (e.g. /api/v2.0/app/...) to app_api instead of api_call.  app_api
+    # only reaches Odysseus's own routes — integrations go through api_call.
+    _integration_path_hints = ("/api/v2.0/", "/api/v1/", "/api/v1.0/")
+    if any(path.startswith(h) for h in _integration_path_hints):
+        integration_name = args.get("integration") or args.get("target") or "<integration name>"
+        req_method = (args.get("method") or "GET").upper()
+        hint = (
+            f'Wrong tool: \'{path}\' is an external integration endpoint, not an Odysseus route. '
+            f'Use the api_call tool instead: '
+            f'{{"integration": "{integration_name}", "method": "{req_method}", "path": "{path}"}}'
+        )
+        return {"error": hint, "exit_code": 1}
+
     if any(path.startswith(p) for p in _APP_API_BLOCKLIST_PREFIXES):
         return {"error": f"Path blocked for safety: {path}. Sensitive endpoints are off-limits via app_api.", "exit_code": 1}
 

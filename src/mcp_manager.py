@@ -5,6 +5,7 @@ Manages connections to MCP (Model Context Protocol) tool servers.
 Each server exposes tools that are made available to the agent loop.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
+
+# Large model downloads can run for a long time; still cap calls so a dead HTTP
+# MCP session (stale mcp-session-id after the remote server restarts) cannot
+# wedge the agent loop indefinitely.
+_MCP_CALL_TIMEOUT_SEC = float(os.environ.get("ODYSSEUS_MCP_CALL_TIMEOUT_SEC", "3600"))
 
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
@@ -448,28 +454,52 @@ class McpManager:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
         try:
-            result = await self._do_call(session, tool_name, arguments)
+            result = await asyncio.wait_for(
+                self._do_call(session, tool_name, arguments),
+                timeout=_MCP_CALL_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "MCP tool call timed out after %ss: %s",
+                _MCP_CALL_TIMEOUT_SEC,
+                qualified_name,
+            )
+            return {
+                "error": f"MCP tool call timed out after {_MCP_CALL_TIMEOUT_SEC:.0f}s",
+                "exit_code": 1,
+            }
         except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
+            logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
             if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
                 reconnected = await self._reconnect_builtin(server_id)
-                if reconnected:
-                    session = self._sessions.get(server_id)
-                    if session:
-                        try:
-                            result = await self._do_call(session, tool_name, arguments)
-                        except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
-                    else:
-                        return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
-                else:
-                    logger.error(f"MCP reconnect failed for {server_id}")
-                    return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
             else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                reconnected = await self._reconnect_from_db(server_id)
+            if reconnected:
+                session = self._sessions.get(server_id)
+                if session:
+                    try:
+                        result = await asyncio.wait_for(
+                            self._do_call(session, tool_name, arguments),
+                            timeout=_MCP_CALL_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "MCP tool call timed out after reconnect (%ss): %s",
+                            _MCP_CALL_TIMEOUT_SEC,
+                            qualified_name,
+                        )
+                        return {
+                            "error": f"MCP tool call timed out after {_MCP_CALL_TIMEOUT_SEC:.0f}s",
+                            "exit_code": 1,
+                        }
+                    except Exception as e2:
+                        logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
+                        return {"error": str(e2), "exit_code": 1}
+                else:
+                    return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
+            else:
+                logger.error(f"MCP reconnect failed for {server_id}")
+                return {"error": f"MCP server unavailable and reconnect failed: {server_id}", "exit_code": 1}
 
         return result
 
@@ -500,6 +530,30 @@ class McpManager:
         if images:
             result_dict["images"] = images
         return result_dict
+
+    async def _reconnect_from_db(self, server_id: str) -> bool:
+        """Tear down and reconnect an admin-configured MCP server from the DB."""
+        from src.database import McpServer, SessionLocal
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if not srv:
+                return False
+            await self.disconnect_server(server_id)
+            args = json.loads(srv.args) if srv.args else []
+            env = json.loads(srv.env) if srv.env else {}
+            return await self.connect_server(
+                server_id=server_id,
+                name=srv.name,
+                transport=srv.transport,
+                command=srv.command or "",
+                args=args,
+                env=env,
+                url=srv.url or "",
+            )
+        finally:
+            db.close()
 
     async def _reconnect_builtin(self, server_id: str) -> bool:
         """Tear down and reconnect a crashed builtin MCP server."""

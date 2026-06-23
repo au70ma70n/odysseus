@@ -7,7 +7,7 @@ upstream returned a concrete model/API error, the probe used to collapse it into
 import pytest
 from fastapi import HTTPException
 
-from src.research_handler import ResearchHandler, _format_probe_failure
+from src.research_handler import ResearchHandler, _format_probe_failure, _probe_call_budget
 
 
 def test_probe_failure_preserves_upstream_model_errors():
@@ -32,10 +32,49 @@ def test_probe_failure_keeps_api_key_guidance():
     )
 
 
+def test_probe_call_budget_ollama_openai_compat_gets_cold_load_time():
+    timeout, retries = _probe_call_budget(
+        "http://host.docker.internal:11434/v1/chat/completions"
+    )
+    assert timeout == 180
+    assert retries == 2
+
+
+def test_probe_call_budget_ollama_native_gets_cold_load_time():
+    timeout, retries = _probe_call_budget("http://localhost:11434/api/chat")
+    assert timeout == 180
+    assert retries == 2
+
+
+def test_probe_call_budget_cloud_api_stays_fast():
+    timeout, retries = _probe_call_budget("https://api.openai.com/v1/chat/completions")
+    assert timeout == 15
+    assert retries == 1
+
+
 def test_probe_failure_keeps_reachability_guidance_for_plain_errors():
     msg = _format_probe_failure("local-model", RuntimeError("connection refused"))
 
     assert msg == "Cannot reach model 'local-model' — connection refused"
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_uses_ollama_cold_load_budget(monkeypatch):
+    captured = {}
+
+    async def _capture(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("src.llm_core.llm_call_async", _capture)
+
+    await ResearchHandler._probe_endpoint(
+        "http://host.docker.internal:11434/v1/chat/completions",
+        "huihui_ai/Qwen3.6-abliterated:35b",
+        None,
+    )
+
+    assert captured["timeout"] == 180
+    assert captured["max_retries"] == 2
 
 
 @pytest.mark.asyncio

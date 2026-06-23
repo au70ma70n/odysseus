@@ -32,6 +32,30 @@ def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, n))
 
 
+# Research probes a real chat completion before a long run. Cloud APIs answer in
+# seconds; local Ollama loads weights lazily on the first request, and a 35B
+# quant can take 15–60s+ before the first token — the old 15s budget timed out
+# even though the model was installed and reachable.
+_CLOUD_PROBE_TIMEOUT = 15
+_LOCAL_PROBE_TIMEOUT = 90
+_OLLAMA_PROBE_TIMEOUT = 180
+
+
+def _probe_call_budget(endpoint: str) -> tuple[int, int]:
+    """Return (read_timeout_seconds, max_retries) for a research model probe."""
+    from src.llm_core import (
+        _is_ollama_native_url,
+        _is_ollama_openai_compat_url,
+        _is_self_hosted_openai_compatible,
+    )
+
+    if _is_ollama_native_url(endpoint) or _is_ollama_openai_compat_url(endpoint):
+        return _OLLAMA_PROBE_TIMEOUT, 2
+    if _is_self_hosted_openai_compatible(endpoint):
+        return _LOCAL_PROBE_TIMEOUT, 2
+    return _CLOUD_PROBE_TIMEOUT, 1
+
+
 def _format_probe_failure(model: str, exc: Exception) -> str:
     """Turn a failed research model probe into a user-facing message."""
     detail = getattr(exc, "detail", None)
@@ -760,8 +784,13 @@ class ResearchHandler:
     async def _probe_endpoint(endpoint: str, model: str, headers: dict = None):
         """Quick probe to verify the LLM endpoint/model responds before research."""
         from src.llm_core import llm_call_async
+        timeout, max_retries = _probe_call_budget(endpoint)
         try:
-            logger.info(f"Probing {model} at {endpoint} (has_auth={bool(headers and 'Authorization' in (headers or {}))})")
+            logger.info(
+                f"Probing {model} at {endpoint} "
+                f"(has_auth={bool(headers and 'Authorization' in (headers or {}))}, "
+                f"timeout={timeout}s, max_retries={max_retries})"
+            )
             await llm_call_async(
                 url=endpoint,
                 model=model,
@@ -769,8 +798,8 @@ class ResearchHandler:
                 temperature=0,
                 max_tokens=5,
                 headers=headers,
-                timeout=15,
-                max_retries=1,
+                timeout=timeout,
+                max_retries=max_retries,
             )
             logger.info(f"Endpoint probe OK: {model}")
         except Exception as e:

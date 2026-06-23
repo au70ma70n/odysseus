@@ -16,12 +16,21 @@ from services.search import content as service_content
     "http://[ff02::1]/",
     "http://[::]/",
 ])
-def test_search_content_url_guard_blocks_internal_names_and_address_classes(module, url):
+def test_search_content_url_guard_blocks_internal_names_and_address_classes(module, url, monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
     assert module._public_http_url(url) is False
 
 
 @pytest.mark.parametrize("module", [service_content])
+def test_search_content_url_guard_allows_internal_when_opt_in_on(monkeypatch, module):
+    monkeypatch.setenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", "1")
+    assert module._public_http_url("http://nas.lan/") is True
+    assert module._public_http_url("https://server.lan:444/api/docs/") is True
+
+
+@pytest.mark.parametrize("module", [service_content])
 def test_search_content_url_guard_blocks_dns_to_multicast(monkeypatch, module):
+    monkeypatch.delenv("ODYSSEUS_ALLOW_PRIVATE_WEB_FETCH", raising=False)
     monkeypatch.setattr(
         module,
         "_resolve_hostname_ips",
