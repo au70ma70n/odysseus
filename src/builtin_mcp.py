@@ -76,6 +76,13 @@ _BUILTIN_SERVERS = {
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
 }
 
+_OPENSCAD_ENABLED = os.environ.get("ODYSSEUS_OPENSCAD_MCP_ENABLED", "").lower() in ("1", "true", "yes")
+if _OPENSCAD_ENABLED:
+    _BUILTIN_SERVERS["openscad"] = (
+        "mcp_servers/openscad_bridge_server.py",
+        "Built-in: OpenSCAD 3D Printing",
+    )
+
 # NPX-based built-in servers (run via npx, not Python)
 _BUILTIN_NPX_SERVERS = {
     "builtin_browser": {
@@ -98,6 +105,13 @@ async def register_builtin_servers(mcp_manager):
     base_dir = get_app_root()
     python = sys.executable
 
+    def _server_env(server_id: str) -> dict:
+        env = {"PYTHONPATH": base_dir}
+        if server_id == "openscad":
+            url = os.environ.get("OPENSCAD_MCP_URL", "http://openscad-mcp:8000")
+            env["OPENSCAD_MCP_URL"] = url
+        return env
+
     async def _connect_python_server(server_id: str, script_path: str, name: str):
         try:
             ok = await mcp_manager.connect_server(
@@ -106,7 +120,7 @@ async def register_builtin_servers(mcp_manager):
                 transport="stdio",
                 command=python,
                 args=[script_path],
-                env={"PYTHONPATH": base_dir},
+                env=_server_env(server_id),
             )
             if ok:
                 logger.info(f"Built-in MCP server registered: {name}")

@@ -78,6 +78,9 @@ services:
       - PROTON_CALDAV_URL=${PROTON_CALDAV_URL:-http://ferroxide:8081/}
       - FERROXIDE_PROTON_USER=${FERROXIDE_PROTON_USER:-}
       - FERROXIDE_BRIDGE_PASSWORD=${FERROXIDE_BRIDGE_PASSWORD:-}
+      # OpenSCAD text-to-STL sidecar (jhacksman/OpenSCAD-MCP-Server)
+      - ODYSSEUS_OPENSCAD_MCP_ENABLED=${ODYSSEUS_OPENSCAD_MCP_ENABLED:-1}
+      - OPENSCAD_MCP_URL=${OPENSCAD_MCP_URL:-http://openscad-mcp:8000}
       # PUID / PGID — the user/group the container drops to before
       # running uvicorn (entrypoint also chowns /app/data + /app/logs
       # to match, so bind-mounted files stay editable from the host).
@@ -95,6 +98,17 @@ services:
         condition: service_started
       ferroxide:
         condition: service_started
+      openscad-mcp:
+        condition: service_healthy
+    restart: unless-stopped
+
+  openscad-mcp:
+    build:
+      context: ./docker/openscad-mcp
+      args:
+        OPENSCAD_MCP_REF: ${OPENSCAD_MCP_REF:-6948c2dc5a385adc987bc3ff75ba435d26f48ba3}
+    volumes:
+      - ${APP_DATA_DIR:-./data}/openscad-mcp:/app/output:z
     restart: unless-stopped
 
   ferroxide:

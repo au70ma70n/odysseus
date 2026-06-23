@@ -67,6 +67,7 @@ import bcrypt as _bcrypt
 
 from src.app_helpers import abs_join, serve_html_with_nonce
 from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
+from src.generated_models import GENERATED_MODEL_HEADERS, resolve_generated_model_path
 from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
@@ -482,6 +483,32 @@ async def serve_generated_image(filename: str, request: Request):
         str(img_path),
         media_type=mime,
         headers=GENERATED_IMAGE_HEADERS,
+    )
+
+
+@app.get("/api/generated-model/{filename}")
+async def serve_generated_model(filename: str):
+    """Serve generated 3D model files (STL, etc.) from the data directory."""
+    model_path = resolve_generated_model_path(filename)
+    ext = filename.rsplit(".", 1)[-1].lower()
+    mime = {
+        "stl": "model/stl",
+        "obj": "model/obj",
+        "3mf": "model/3mf",
+        "amf": "application/amf+xml",
+        "scad": "application/x-openscad",
+        "csg": "application/octet-stream",
+        "off": "application/octet-stream",
+    }.get(ext, "application/octet-stream")
+    headers = {
+        **GENERATED_MODEL_HEADERS,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return FileResponse(
+        str(model_path),
+        media_type=mime,
+        headers=headers,
+        filename=filename,
     )
 
 # ========= YOUTUBE INIT =========
