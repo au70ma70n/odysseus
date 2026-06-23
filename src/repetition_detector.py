@@ -129,3 +129,73 @@ class RepetitionCollapseDetector:
         self._collapsed = False
         self._trigger_phrase = None
         self._chars_since_check = 0
+
+    @property
+    def buffer(self) -> str:
+        """The accumulated text buffer (read-only)."""
+        return self._buf
+
+
+def truncate_before_collapse(text: str, trigger_phrase: str | None = None) -> str:
+    """Strip the degenerate repetition tail from a collapsed response.
+
+    Finds where the repetition started and returns only the good content
+    before the loop.  If *trigger_phrase* is provided (from
+    ``RepetitionCollapseDetector.trigger_phrase``), uses it to locate the
+    first onset of the repeating segment.  Otherwise applies a generic
+    heuristic that looks for long runs of any repeated token/phrase.
+
+    Returns the original text unchanged if no collapse point is found.
+    """
+    if not text:
+        return text
+
+    if trigger_phrase:
+        # Find where the trigger phrase first starts repeating consecutively.
+        # Walk backwards from the end to find the onset of the repetition block.
+        needle = trigger_phrase
+        # Find the last occurrence, then scan backwards to find first consecutive run
+        segments = text.split(needle)
+        if len(segments) <= 2:
+            return text
+
+        # Rebuild up to the point where consecutive repeats start.
+        # Walk from the end: consecutive empty/whitespace-only segments = repeats.
+        good_end = len(text)
+        pos = len(text)
+        consecutive = 0
+        for i in range(len(segments) - 1, 0, -1):
+            pos -= len(needle) + len(segments[i])
+            if segments[i].strip() == "" or len(segments[i].strip()) <= 2:
+                consecutive += 1
+            else:
+                break
+        if consecutive >= 3:
+            # Cut at the start of the repetition block
+            good_end = pos + len(segments[len(segments) - 1 - consecutive])
+            truncated = text[:good_end].rstrip()
+            if truncated:
+                return truncated
+
+    # Generic heuristic: find where a token repeats REPEAT_THRESHOLD times
+    tokens = text.split()
+    if len(tokens) < REPEAT_THRESHOLD:
+        return text
+
+    run_start = 0
+    run_len = 1
+    for i in range(1, len(tokens)):
+        if tokens[i] == tokens[i - 1] and len(tokens[i]) <= MAX_REPEAT_TOKEN_LEN:
+            run_len += 1
+            if run_len >= REPEAT_THRESHOLD:
+                # Found the collapse — return everything before this run
+                cut_idx = run_start
+                good_tokens = tokens[:cut_idx]
+                if good_tokens:
+                    return " ".join(good_tokens).rstrip()
+                return text
+        else:
+            run_start = i
+            run_len = 1
+
+    return text
