@@ -1586,6 +1586,27 @@ def _build_base_prompt(
 
 
 
+_OPENSCAD_FENCE_RE = re.compile(
+    r"```openscad\s*\n([\s\S]*?)```",
+    re.IGNORECASE,
+)
+
+
+def _try_openscad_fence(response: str) -> Optional["ToolBlock"]:
+    """If the model wrote an ```openscad code fence, synthesize a generate_custom_scad MCP tool block."""
+    m = _OPENSCAD_FENCE_RE.search(response)
+    if not m:
+        return None
+    scad_code = m.group(1).strip()
+    if len(scad_code) < 20:
+        return None
+    args = {"scad_code": scad_code, "description": "Custom OpenSCAD model", "export_stl": True}
+    return function_call_to_tool_block(
+        "mcp__openscad__generate_custom_scad",
+        json.dumps(args),
+    )
+
+
 def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num: int, is_api_model: bool = False):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
     used_native = False
@@ -1620,6 +1641,15 @@ def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num
         tool_blocks = parse_tool_blocks(round_response, skip_fenced=is_api_model)
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
+
+    # OpenSCAD fallback: an ```openscad fence is never illustrative — the model
+    # wrote real SCAD code intending it to be rendered. Synthesize a
+    # generate_custom_scad MCP call even when fenced-block parsing was skipped.
+    if not tool_blocks:
+        scad_block = _try_openscad_fence(round_response)
+        if scad_block:
+            tool_blocks = [scad_block]
+            logger.info(f"Agent round {round_num}: synthesized generate_custom_scad from ```openscad fence")
 
     resp_preview = round_response[:200].replace('\n', '\\n') if round_response else "(empty)"
     logger.info(f"Agent round {round_num} summary: {len(round_response)} chars, "
@@ -2949,7 +2979,11 @@ async def stream_agent_loop(
             tc.get("name") in ("create_document", "update_document")
             for tc in native_tool_calls
         )
-        if not has_doc_tool and session_id and "create_document" not in (disabled_tools or set()):
+        _has_openscad_mcp = any(
+            b.tool_type.startswith("mcp__openscad__")
+            for b in tool_blocks
+        )
+        if not has_doc_tool and not _has_openscad_mcp and session_id and "create_document" not in (disabled_tools or set()):
             _code_block_re = re.compile(r'```(\w*)\n([\s\S]*?)```')
             for m in _code_block_re.finditer(round_response):
                 lang_tag = m.group(1).lower()
@@ -3422,6 +3456,9 @@ async def stream_agent_loop(
             for k in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
                 if k in result:
                     tool_output_data[k] = result[k]
+            for k in ("model_url", "model_prompt", "model_format", "model_preview_url", "model_preview_urls"):
+                if k in result:
+                    tool_output_data[k] = result[k]
             # Forward screenshots from browser tools (base64 images)
             if result.get("images"):
                 img = result["images"][0]
@@ -3489,6 +3526,13 @@ async def stream_agent_loop(
                 for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
                     if result.get(ik):
                         tool_event[ik] = result[ik]
+            if result.get("model_url") or result.get("model_preview_urls"):
+                for mk in (
+                    "model_url", "model_prompt", "model_format",
+                    "model_preview_url", "model_preview_urls",
+                ):
+                    if result.get(mk):
+                        tool_event[mk] = result[mk]
             if result.get("doc_id"):
                 tool_event["doc_id"] = result["doc_id"]
                 tool_event["doc_title"] = result.get("title", "")

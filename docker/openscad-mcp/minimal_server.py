@@ -55,6 +55,34 @@ for _fmt, _desc in _EXTRA_FORMATS.items():
 models: Dict[str, Dict[str, Any]] = {}
 mcp_server = MCPServer()
 
+_PREVIEW_VIEWS = ("perspective", "front", "top", "right")
+
+
+def _preview_urls_for(model_id: str) -> Dict[str, str]:
+    return {view: f"/preview/{view}/{model_id}" for view in _PREVIEW_VIEWS}
+
+
+def _model_response(
+    model_id: str,
+    *,
+    model_type: str,
+    parameters: Dict[str, Any],
+    description: str = "",
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "model_id": model_id,
+        "model_type": model_type,
+        "parameters": parameters,
+        "supported_formats": cad_exporter.get_supported_formats(),
+        "preview_urls": _preview_urls_for(model_id),
+    }
+    if description:
+        out["description"] = description
+    if extra:
+        out.update(extra)
+    return out
+
 
 def _export_mesh(scad_file: str, model_id: str, fmt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
     if fmt == "stl":
@@ -100,10 +128,12 @@ def create_3d_model(description: str) -> Dict[str, Any]:
         "format": "csg",
     }
     return {
-        "model_id": model_id,
-        "model_type": model_type,
-        "parameters": parameters,
-        "supported_formats": cad_exporter.get_supported_formats(),
+        **_model_response(
+            model_id,
+            model_type=model_type,
+            parameters=parameters,
+            description=description,
+        ),
     }
 
 
@@ -141,10 +171,11 @@ def modify_3d_model(model_id: str, modifications: str) -> Dict[str, Any]:
         "previews": previews,
     }
     return {
-        "model_id": model_id,
-        "model_type": model_info["type"],
-        "parameters": new_parameters,
-        "supported_formats": cad_exporter.get_supported_formats(),
+        **_model_response(
+            model_id,
+            model_type=model_info["type"],
+            parameters=new_parameters,
+        ),
     }
 
 
@@ -175,10 +206,16 @@ def export_model(model_id: str, format: str = "stl") -> Dict[str, Any]:
     models[model_id]["model_file"] = model_file
     models[model_id]["format"] = fmt
     return {
-        "model_id": model_id,
-        "format": fmt,
-        "model_file": model_file,
-        "download_url": f"/download/{model_id}",
+        **_model_response(
+            model_id,
+            model_type=model_info["type"],
+            parameters=model_info["parameters"],
+            extra={
+                "format": fmt,
+                "model_file": model_file,
+                "download_url": f"/download/{model_id}",
+            },
+        ),
     }
 
 
@@ -192,6 +229,67 @@ def create_stl_for_printing(description: str) -> Dict[str, Any]:
         **exported,
         "description": description,
     }
+
+
+@mcp_server.tool
+def generate_custom_scad(scad_code: str, description: str = "", export_stl: bool = True) -> Dict[str, Any]:
+    """Render arbitrary OpenSCAD code into a 3D model with previews and optional STL export.
+
+    Use this tool when the built-in shape templates are insufficient — for example
+    threaded parts, multi-body assemblies, gears, snap-fits, or any geometry that
+    requires raw OpenSCAD scripting.  The caller (typically the LLM) writes valid
+    OpenSCAD code and passes it here.
+
+    Args:
+        scad_code: Complete, valid OpenSCAD source code to render.
+        description: Human-readable summary of what the code produces.
+        export_stl: If True (default), also export an STL for 3D printing.
+    """
+    model_id = str(uuid.uuid4())
+    scad_file = openscad_wrapper.generate_scad(scad_code, model_id)
+
+    # Try to infer bounding dimensions from the code for camera framing
+    import re as _re
+    dims: Dict[str, float] = {}
+    for key in ("width", "depth", "height", "radius", "outer_radius", "outer_diameter",
+                "pipe_od", "flange_diameter", "flange_od"):
+        m = _re.search(rf'{key}\s*=\s*([0-9]+(?:\.[0-9]+)?)', scad_code)
+        if m:
+            dims[key] = float(m.group(1))
+
+    previews = openscad_wrapper.generate_multi_angle_previews(scad_file, dims or None)
+
+    model_file = None
+    fmt = "scad"
+    if export_stl:
+        try:
+            model_file = openscad_wrapper.generate_stl(scad_file)
+            fmt = "stl"
+        except Exception as exc:
+            logger.warning("STL export failed for custom SCAD: %s", exc)
+
+    models[model_id] = {
+        "id": model_id,
+        "type": "custom",
+        "parameters": dims,
+        "description": description,
+        "scad_file": scad_file,
+        "model_file": model_file,
+        "previews": previews,
+        "format": fmt,
+    }
+
+    resp = _model_response(
+        model_id,
+        model_type="custom",
+        parameters=dims,
+        description=description,
+    )
+    if model_file:
+        resp["format"] = fmt
+        resp["model_file"] = model_file
+        resp["download_url"] = f"/download/{model_id}"
+    return resp
 
 
 @app.post("/tool_call")
@@ -208,6 +306,19 @@ async def handle_tool_call(request: Request) -> JSONResponse:
     except Exception as exc:
         logger.error("Error calling tool %s: %s", tool_name, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/preview/{view}/{model_id}")
+async def get_preview(view: str, model_id: str) -> FileResponse:
+    if model_id not in models:
+        raise HTTPException(status_code=404, detail=f"Model with ID {model_id} not found")
+    previews = models[model_id].get("previews") or {}
+    if view not in previews:
+        raise HTTPException(status_code=404, detail=f"Preview for view {view} not found")
+    preview_path = previews[view]
+    if not preview_path or not os.path.exists(preview_path):
+        raise HTTPException(status_code=404, detail="Preview image not found")
+    return FileResponse(preview_path, media_type="image/png")
 
 
 @app.get("/download/{model_id}")

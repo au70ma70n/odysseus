@@ -465,6 +465,35 @@ def _promote_image_fields(result: Dict) -> None:
             result[field] = fm.group(1).strip()
 
 
+def _promote_model_fields(result: Dict) -> None:
+    """Lift STL/model download URL and preview images from OpenSCAD MCP stdout."""
+    if not isinstance(result, dict) or result.get("exit_code") != 0:
+        return
+    out = result.get("stdout") or ""
+    m = re.search(r'(?:https?://[^\s)\]]+)?/api/generated-model/[A-Za-z0-9._-]+', out)
+    if m:
+        result["model_url"] = m.group(0).strip()
+    preview_urls: List[str] = []
+    for line in out.splitlines():
+        pm = re.match(r'^Preview\s+(\w+):\s*(\S+)', line.strip())
+        if pm:
+            preview_urls.append(pm.group(2).strip())
+        else:
+            im = re.search(r'(?:https?://[^\s)\]]+)?/api/generated-image/[A-Za-z0-9._-]+', line)
+            if im and "Preview" in line:
+                preview_urls.append(im.group(0).strip())
+    if preview_urls:
+        result["model_preview_urls"] = preview_urls
+        result["model_preview_url"] = preview_urls[0]
+    for field, pat in (
+        ("model_prompt", r'^description:\s*(.+)$'),
+        ("model_format", r'^format:\s*(\S+)$'),
+    ):
+        fm = re.search(pat, out, re.M)
+        if fm:
+            result[field] = fm.group(1).strip()
+
+
 _BG_MARKERS = {"#!bg", "#bg", "# bg", "#background", "# background", "@background", "# @background"}
 
 
@@ -935,6 +964,8 @@ async def _execute_tool_block_impl(
                     result = await mcp.call_tool(tool, args)
                 if result.get("image_url"):
                     _promote_image_fields(result)
+                if tool.startswith("mcp__openscad__") or "create_stl" in tool or "export_model" in tool or "create_3d_model" in tool:
+                    _promote_model_fields(result)
         else:
             desc = f"mcp: {tool}"
             result = {"error": "MCP manager not available", "exit_code": 1}

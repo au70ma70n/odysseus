@@ -2,7 +2,7 @@
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openscad git ca-certificates \
+    && apt-get install -y --no-install-recommends openscad git ca-certificates xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 ARG OPENSCAD_MCP_REPO=https://github.com/jhacksman/OpenSCAD-MCP-Server.git
@@ -19,13 +19,17 @@ RUN git clone "${OPENSCAD_MCP_REPO}" /tmp/openscad-mcp \
     && cp src/models/scad_templates/basic_shapes.scad /app/scad/basic_shapes.scad \
     && rm -rf /tmp/openscad-mcp
 
-COPY requirements-min.txt mcp_legacy.py minimal_server.py /app/
-RUN pip install --no-cache-dir -r requirements-min.txt
+COPY requirements-min.txt mcp_legacy.py minimal_server.py entrypoint.sh wrapper.py threads.scad /app/
+RUN cp /app/wrapper.py /app/src/openscad_wrapper/wrapper.py \
+    && cp /app/threads.scad /app/scad/threads.scad
+RUN pip install --no-cache-dir -r requirements-min.txt \
+    && chmod +x /app/entrypoint.sh
 
 ENV PYTHONPATH=/app
+ENV DISPLAY=:99
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=20s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"
 
-CMD ["uvicorn", "minimal_server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/entrypoint.sh"]

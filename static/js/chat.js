@@ -124,6 +124,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   // Model/image pricing, _buildImageBubble now in chatRenderer.js
   var _buildImageBubble = chatRenderer.buildImageBubble;
+  var _buildModelDownloadBubble = chatRenderer.buildModelDownloadBubble;
   var getModelCost = chatRenderer.getModelCost;
   var getImageCost = chatRenderer.getImageCost;
 
@@ -1584,9 +1585,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     }
                     var s = ((Date.now() - _thinkTimerStart) / 1000).toFixed(1);
                     _liveThinkTimerEl.textContent = _formatThinkStats(s, _liveThinkTokenCount);
-                    _thinkTimerRAF = requestAnimationFrame(_tickThinkTimer);
-                  }
-                  _thinkTimerRAF = requestAnimationFrame(_tickThinkTimer);
+                  }, 1000);
                   // Whirlpool spinner
                   if (_liveThinkSpinnerSlot) {
                     var _wp = spinnerModule.createWhirlpool(12);
@@ -2266,6 +2265,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   uiModule.scrollHistory();
                   // Notify gallery to refresh if open
                   window.dispatchEvent(new CustomEvent('gallery-refresh'));
+                }
+                if (json.model_url || json.model_preview_urls) {
+                  const chatBox = document.getElementById('chat-history');
+                  chatBox.appendChild(_buildModelDownloadBubble(
+                    json.model_url, json.model_prompt, json.model_format, json.model_preview_urls
+                  ));
+                  uiModule.scrollHistory();
                 }
                 // --- Render browser screenshots in tool output ---
                 if (json.screenshot && currentToolBubble) {

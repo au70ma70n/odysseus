@@ -2,6 +2,7 @@
 // This module handles all session-related operations
 
 import Storage from './storage.js';
+import { sessionIdFromHash, isPreservedAppHash } from './hashRouting.js';
 import uiModule, { styledPrompt } from './ui.js';
 import markdownModule from './markdown.js';
 import chatRenderer from './chatRenderer.js';
@@ -1373,7 +1374,7 @@ export async function loadSessions() {
     // most recently appended a message.
     const _isTransient = (s) => !!s && (s.folder === 'Assistant' || s.folder === 'Tasks');
     const _realSessions = activeSessions.filter(s => !_isTransient(s));
-    const hashId = window.location.hash.replace('#', '');
+    const hashId = sessionIdFromHash(window.location.hash);
     let savedId = Storage.get('lastSessionId');
     // If the persisted lastSessionId points to a transient session (legacy
     // state from before the persistence-guard was added), drop it.
@@ -1480,6 +1481,15 @@ export async function loadSessions() {
           }
         } catch (_) { /* no default model — that's fine, user can /setup */ }
         _autoCreateInProgress = false;
+      }
+    }
+
+    const rawHash = window.location.hash.replace('#', '');
+    if (rawHash && !sessionIdFromHash(rawHash) && !isPreservedAppHash(rawHash)) {
+      if (currentSessionId) {
+        history.replaceState(null, '', '#' + currentSessionId);
+      } else {
+        history.replaceState(null, '', window.location.pathname);
       }
     }
   } catch (error) {
@@ -2004,15 +2014,26 @@ export function initDragSort() {
 }
 
 // Hash-based routing: navigate between sessions with browser back/forward.
-// Skip entity-prefixed hashes (document-, note-, etc.) — those are handled
-// by their own click handlers in chatRenderer.js and must not trigger
-// session navigation (which would reset the active chat).
+// Supports bare UUID hashes (#4820c7fe-…) and agent links (#session-4820c7fe-…).
+// Entity hashes (document-, note-, etc.) and single-word routes (#cookbook)
+// are left to their own handlers. Stale mangled hashes from bad assistant
+// links (#api-generated-model-…) are cleared so they don't block navigation.
 window.addEventListener('hashchange', () => {
-  const hashId = window.location.hash.replace('#', '');
-  if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId)) return;
-  if (hashId && hashId !== currentSessionId) {
-    const target = sessions.find(s => s.id === hashId && !s.archived);
-    if (target) selectSession(hashId);
+  const raw = window.location.hash.replace('#', '');
+  const sessionId = sessionIdFromHash(raw);
+  if (!sessionId) {
+    if (raw && !isPreservedAppHash(raw)) {
+      if (currentSessionId) {
+        history.replaceState(null, '', '#' + currentSessionId);
+      } else {
+        history.replaceState(null, '', window.location.pathname);
+      }
+    }
+    return;
+  }
+  if (sessionId !== currentSessionId) {
+    const target = sessions.find(s => s.id === sessionId && !s.archived);
+    if (target) selectSession(sessionId);
   }
 });
 

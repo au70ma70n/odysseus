@@ -10,6 +10,7 @@ import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
+import { sessionIdFromHref } from './hashRouting.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -1139,9 +1140,21 @@ document.addEventListener('click', function(e) {
   const a = _t && _t.closest && _t.closest('a[href]');
   if (!a) return;
   const href = a.getAttribute('href') || '';
-  if (!href.startsWith('#')) return;
-  const m = href.match(/^#(session|document|note|image|email|event|task|skill|research)-(.+)$/);
-  if (!m) return;
+  const hashIdx = href.indexOf('#');
+  if (hashIdx < 0) return;
+  const hashPart = href.slice(hashIdx);
+  const m = hashPart.match(/^#(session|document|note|image|email|event|task|skill|research)-(.+)$/);
+  if (!m) {
+    const sessionId = sessionIdFromHref(href);
+    if (!sessionId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    import('./sessions.js').then(mod => {
+      const fn = mod.selectSession || (mod.default && mod.default.selectSession);
+      if (fn) fn(sessionId);
+    });
+    return;
+  }
   e.preventDefault();
   e.stopPropagation();
   const [, kind, id] = m;
@@ -1195,6 +1208,75 @@ document.addEventListener('click', function(e) {
     }).catch(() => {});
   }
 });
+
+/**
+ * Build a 3D model card with preview images and optional STL download.
+ */
+export function buildModelDownloadBubble(modelUrl, prompt, format, previewUrls) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-ai generated-model-wrap';
+
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = ((format || '3d') + ' model').toUpperCase();
+  wrap.appendChild(role);
+
+  const body = document.createElement('div');
+  body.className = 'body';
+
+  const previews = Array.isArray(previewUrls)
+    ? previewUrls
+    : (previewUrls ? [previewUrls] : []);
+
+  if (previews.length) {
+    const grid = document.createElement('div');
+    grid.className = 'generated-model-previews';
+    previews.forEach((url, i) => {
+      const safeUrl = safeDisplayImageSrc(url);
+      if (!safeUrl) return;
+      const cell = document.createElement('div');
+      cell.className = 'generated-model-preview-cell';
+      const label = document.createElement('div');
+      label.className = 'generated-model-preview-label';
+      label.textContent = ['perspective', 'front', 'top', 'right'][i] || `view ${i + 1}`;
+      const img = document.createElement('img');
+      img.className = 'generated-model-preview';
+      img.alt = label.textContent;
+      img.title = label.textContent;
+      img.src = safeUrl;
+      img.addEventListener('click', () => {
+        window.open(safeUrl, '_blank', 'noopener,noreferrer');
+      });
+      cell.appendChild(label);
+      cell.appendChild(img);
+      grid.appendChild(cell);
+    });
+    body.appendChild(grid);
+  }
+
+  const safeModelUrl = modelUrl ? safeDisplayImageSrc(modelUrl) : '';
+  if (safeModelUrl) {
+    const link = document.createElement('a');
+    link.className = 'generated-model-download';
+    link.href = safeModelUrl;
+    link.download = '';
+    link.textContent = 'Download ' + (format || 'STL').toUpperCase();
+    link.addEventListener('click', (e) => { e.stopPropagation(); });
+    body.appendChild(link);
+  } else if (!previews.length) {
+    body.textContent = '[Model file unavailable]';
+  }
+
+  if (prompt) {
+    const caption = document.createElement('div');
+    caption.className = 'generated-image-caption';
+    caption.textContent = prompt;
+    body.appendChild(caption);
+  }
+
+  wrap.appendChild(body);
+  return wrap;
+}
 
 /**
  * Build a generated-image bubble element.
@@ -2311,6 +2393,11 @@ export function addMessage(role, content, modelName, metadata) {
             if (ev.image_url) {
               box.appendChild(buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
             }
+            if (ev.model_url || ev.model_preview_urls) {
+              box.appendChild(buildModelDownloadBubble(
+                ev.model_url, ev.model_prompt, ev.model_format, ev.model_preview_urls
+              ));
+            }
           }
         }
       }
@@ -2671,6 +2758,7 @@ const chatRenderer = {
   buildFindingsBox,
   appendReportButton,
   buildImageBubble,
+  buildModelDownloadBubble,
   hideWelcomeScreen,
   showWelcomeScreen,
   createMsgFooter,

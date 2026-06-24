@@ -6057,6 +6057,45 @@ body.bg-pattern-sparkles {
       text-align: center;
     }
 
+    /* OpenSCAD model previews + STL download in chat */
+    .msg.generated-model-wrap .body { text-align: center; }
+    .generated-model-previews {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .generated-model-preview-cell { text-align: center; }
+    .generated-model-preview-label {
+      font-size: 0.7rem;
+      opacity: 0.55;
+      text-transform: capitalize;
+      margin-bottom: 4px;
+    }
+    .generated-model-preview {
+      width: 100%;
+      max-height: 160px;
+      object-fit: contain;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      background: var(--panel);
+    }
+    .generated-model-download {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 8px 14px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--red) 14%, var(--panel));
+      border: 1px solid var(--border);
+      color: var(--fg);
+      text-decoration: none;
+      font-size: 0.85rem;
+    }
+    .generated-model-download:hover {
+      border-color: var(--red);
+    }
+
     /* Setup wizard */
     .setup-wizard { padding: 16px; max-width: 500px; }
     .setup-wizard .setup-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: var(--fg); }

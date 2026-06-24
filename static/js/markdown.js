@@ -10,10 +10,24 @@ import { replaceEmojiShortcodes, hasEmojiShortcode } from './emojiShortcodes.js'
 
 var escapeHtml = uiModule.esc;
 
+const _ENTITY_HASH_RE = /^#(session|document|note|image|email|event|task|skill|research)-[A-Za-z0-9_-]+$/;
+const _SESSION_UUID_HASH_RE = /^#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const _GENERATED_ASSET_PATH_RE = /^\/api\/generated-(?:image|model)\/[A-Za-z0-9._-]+$/;
+
 function safeLinkUrl(rawUrl) {
   const url = String(rawUrl || '').trim();
   if (url.startsWith('#')) {
-    return /^#[A-Za-z0-9_-]*$/.test(url) ? url : '';
+    // Only real in-app anchors (entity links or bare session UUID hashes).
+    // Reject model-mangled hashes like #api-generated-model-abc-stl.
+    if (_ENTITY_HASH_RE.test(url) || _SESSION_UUID_HASH_RE.test(url)) return url;
+    return '';
+  }
+  if (_GENERATED_ASSET_PATH_RE.test(url)) {
+    try {
+      return new URL(url, window.location.origin).href;
+    } catch (_) {
+      return '';
+    }
   }
   try {
     const parsed = new URL(url, window.location.origin);
@@ -27,11 +41,19 @@ function safeLinkUrl(rawUrl) {
 }
 
 function linkHtml(text, url) {
-  const safeUrl = safeLinkUrl(url);
+  let safeUrl = safeLinkUrl(url);
+  if (!safeUrl && text) {
+    safeUrl = safeLinkUrl(text);
+  }
   const safeText = escapeHtml(text);
   if (!safeUrl) return safeText;
   if (safeUrl.startsWith('#')) {
     return `<a href="${safeUrl}" class="chat-link">${safeText}</a>`;
+  }
+  let path = '';
+  try { path = new URL(safeUrl).pathname; } catch (_) {}
+  if (_GENERATED_ASSET_PATH_RE.test(path)) {
+    return `<a href="${escapeHtml(safeUrl)}" class="chat-link chat-download-link" download>${safeText}</a>`;
   }
   return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${safeText}</a>`;
 }
@@ -578,6 +600,12 @@ export function mdToHtml(src, opts) {
   s = s.replace(
     /(^|[\s(<])(https?:\/\/[^\s<>"'`\]]+[^\s<>"'`\].,;:!?])/g,
     (match, prefix, url) => `${prefix}${linkHtml(url, url)}`
+  );
+
+  // Autolink same-origin generated asset paths (ComfyUI images, OpenSCAD STLs).
+  s = s.replace(
+    /(^|[\s(])(\/api\/generated-(?:image|model)\/[A-Za-z0-9._-]+)/g,
+    (match, prefix, path) => `${prefix}${linkHtml(path, path)}`
   );
 
   // Autolink scheme-less domains the model often emits as plain text
