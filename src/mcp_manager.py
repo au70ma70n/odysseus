@@ -605,7 +605,10 @@ class McpManager:
             identity = conn.get("identity", "")
             label = f"{server_name} ({identity})" if identity else server_name
 
-            for tool in tools:
+            from src.comfyui_mcp import comfyui_virtual_tools
+
+            all_tools = list(tools) + comfyui_virtual_tools(tools)
+            for tool in all_tools:
                 if tool["name"] in disabled:
                     continue
                 qualified = f"mcp__{server_id}__{tool['name']}"
@@ -624,10 +627,13 @@ class McpManager:
     def get_all_tools(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
         """Return a flat list of all discovered tools with server info."""
         result = []
+        from src.comfyui_mcp import comfyui_virtual_tools
+
         for server_id, tools in self._tools.items():
             conn = self._connections.get(server_id, {})
             disabled = (disabled_map or {}).get(server_id, set())
-            for tool in tools:
+            all_tools = list(tools) + comfyui_virtual_tools(tools)
+            for tool in all_tools:
                 result.append({
                     "server_id": server_id,
                     "server_name": conn.get("name", server_id),

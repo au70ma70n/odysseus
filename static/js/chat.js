@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer, { formatToolOutputHtml } from './chatRenderer.js';
+import chatRenderer, { formatToolOutputHtml, stripDuplicateGeneratedImageMarkdown, normalizeGeneratedImageUrl } from './chatRenderer.js';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -1032,6 +1032,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
+      let deliveredImageUrls = new Set(); // image_url paths already shown via tool bubbles
       let currentToolBubble = null;   // Current tool execution bubble
       let roundFinalized = false;     // Whether current round's text is finalized
       let _sourcesHtml = '';          // Sources box HTML to prepend to body
@@ -1193,9 +1194,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         return (text || '').slice(last.index + last[0].length).trimStart();
       }
 
+      function _stripDeliveredImages(text) {
+        return stripDuplicateGeneratedImageMarkdown(text, deliveredImageUrls);
+      }
+
       // Direct render helper for streaming text
       _renderStream = () => {
-        let dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
+        let dt = _stripDeliveredImages(markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText)));
         const bodyEl = roundHolder.querySelector('.body');
         const contentEl = _ensureStreamLayout(bodyEl);
 
@@ -2085,7 +2090,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!roundFinalized) {
                   roundFinalized = true;
                   if (spinner && spinner.element) spinner.destroy();
-                  const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
+                  const dt = _stripDeliveredImages(markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText)));
                   if (dt.trim()) {
                     var _body3 = roundHolder.querySelector('.body');
                     var _contentEl3 = _ensureStreamLayout(_body3);
@@ -2260,6 +2265,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
                 // --- Render generated images inline ---
                 if (json.image_url) {
+                  deliveredImageUrls.add(normalizeGeneratedImageUrl(json.image_url));
                   const chatBox = document.getElementById('chat-history');
                   chatBox.appendChild(_buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id));
                   uiModule.scrollHistory();
@@ -2566,7 +2572,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (_streamContent) _streamContent.style.minHeight = '';
 
         // Finalize the last round's bubble — flatten stream-content wrapper for clean DOM
-        const finalDisplay = stripToolBlocks(roundText);
+        const finalDisplay = _stripDeliveredImages(stripToolBlocks(roundText));
         if (finalDisplay.trim()) {
           var _body4 = roundHolder.querySelector('.body');
           // Preserve sources expanded state before final render

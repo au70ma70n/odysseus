@@ -609,7 +609,27 @@ async def execute_api_call(
             if not matched:
                 return {"output": f"HTTP 200\nJob {job_id} not found in {len(all_jobs)} jobs.", "exit_code": 0}
             job = matched[0]
-            formatted = json.dumps(job, indent=2, default=str)
+            # Return a compact summary to save agent context tokens.
+            # The full arguments (e.g. compose config) are already known to the
+            # agent from the deploy call — repeating them on every poll wastes budget.
+            compact_job = {
+                "id": job.get("id"),
+                "method": job.get("method"),
+                "state": job.get("state"),
+                "progress": job.get("progress"),
+                "error": job.get("error"),
+                "time_started": job.get("time_started"),
+                "time_finished": job.get("time_finished"),
+            }
+            result = job.get("result")
+            if isinstance(result, dict):
+                compact_job["result"] = {
+                    k: v for k, v in result.items()
+                    if k in ("name", "id", "state", "error", "active_workloads")
+                }
+            elif result is not None:
+                compact_job["result"] = result
+            formatted = json.dumps(compact_job, indent=2, default=str)
             if len(formatted) > _AGENT_JSON_LIMIT:
                 formatted = formatted[:_AGENT_JSON_LIMIT] + "\n... (truncated)"
             return {"output": f"HTTP 200\n{formatted}", "exit_code": 0}

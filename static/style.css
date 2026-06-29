@@ -2112,6 +2112,10 @@ body.bg-pattern-sparkles {
     .msg .body p:empty {
       display: none;
     }
+    .msg .body img {
+      max-width: 100%;
+      height: auto;
+    }
     .msg-user .body {
       color: var(--fg);
     }

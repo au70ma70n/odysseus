@@ -227,13 +227,18 @@ if AUTH_ENABLED:
     AUTH_EXEMPT_PATTERNS = [
         _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
     ]
+    _RESEARCH_REPORT_PATTERN = _re.compile(r"^/api/research/report/[^/]+$")
 
-    def _is_auth_exempt(path: str) -> bool:
+    def _is_auth_exempt(path: str, query: str = "") -> bool:
         if path in AUTH_EXEMPT_EXACT:
             return True
         if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
             return True
-        return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
+        if any(p.match(path) for p in AUTH_EXEMPT_PATTERNS):
+            return True
+        if _RESEARCH_REPORT_PATTERN.match(path) and "share=" in query:
+            return True
+        return False
 
     # In-memory token cache: prefix → list[(token_id, token_hash, owner, scopes)]. The DB
     # query was running on every API-bearer request and scanning bcrypt
@@ -312,7 +317,7 @@ if AUTH_ENABLED:
             # header; never a credentialed request).
             if is_cors_preflight(request.method, request.headers):
                 return await call_next(request)
-            if _is_auth_exempt(path):
+            if _is_auth_exempt(path, request.url.query or ""):
                 return await call_next(request)
             # In-process internal-tool token bypass. Used by the agent
             # tool layer when it HTTP-loopbacks to admin-gated routes

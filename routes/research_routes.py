@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -209,12 +210,30 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if owner != user:
             raise HTTPException(404, "Research not found")
 
+    def _valid_share_token(session_id: str, token: str) -> bool:
+        """Check if `token` matches the stored share_token for a research session."""
+        if not token or len(token) < 16:
+            return False
+        path = Path(DEEP_RESEARCH_DIR) / f"{session_id}.json"
+        if not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return secrets.compare_digest(data.get("share_token", ""), token)
+        except Exception:
+            return False
+
     @router.get("/api/research/report/{session_id}")
-    async def research_report(session_id: str, request: Request):
-        """Serve the visual HTML report for a completed research session."""
-        user = _require_user(request)
+    async def research_report(session_id: str, request: Request, share: Optional[str] = Query(None)):
+        """Serve the visual HTML report for a completed research session.
+        Supports unauthenticated access via a per-report share token (?share=...)."""
         _validate_session_id(session_id)
-        _assert_owns_research(session_id, user)
+        if share:
+            if not _valid_share_token(session_id, share):
+                raise HTTPException(403, "Invalid or expired share token")
+        else:
+            user = _require_user(request)
+            _assert_owns_research(session_id, user)
         logger.info(f"Visual report requested for session {session_id}")
         try:
             html_content = research_handler.get_report_html(session_id)
@@ -225,6 +244,40 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             logger.warning(f"No report data found for session {session_id}")
             raise HTTPException(404, "No visual report available for this session")
         return HTMLResponse(content=html_content)
+
+    @router.post("/api/research/{session_id}/share")
+    async def research_share(session_id: str, request: Request):
+        """Generate (or retrieve) a share token for a research report.
+        Returns the full shareable URL. Only the report owner can create tokens."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        path = Path(DEEP_RESEARCH_DIR) / f"{session_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        token = data.get("share_token")
+        if not token:
+            token = secrets.token_urlsafe(24)
+            data["share_token"] = token
+            path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            logger.info(f"Share token created for research {session_id}")
+        host = request.headers.get("host", "localhost:7000")
+        scheme = "https" if request.url.scheme == "https" else "http"
+        url = f"{scheme}://{host}/api/research/report/{session_id}?share={token}"
+        return {"share_token": token, "url": url}
+
+    @router.delete("/api/research/{session_id}/share")
+    async def research_unshare(session_id: str, request: Request):
+        """Revoke the share token for a research report."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        path = Path(DEEP_RESEARCH_DIR) / f"{session_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if "share_token" in data:
+            del data["share_token"]
+            path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            logger.info(f"Share token revoked for research {session_id}")
+        return {"ok": True}
 
     class HideImageRequest(BaseModel):
         url: str

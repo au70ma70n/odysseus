@@ -1,14 +1,9 @@
-"""Unit tests for `_promote_image_fields` (PR #2809).
-
-`generate_image` is a text-only MCP tool, so the saved image URL never reaches
-the agent loop's structured forwarding (which renders the image via
-`buildImageBubble` on `result["image_url"]`). `_promote_image_fields` lifts the
-URL — plus prompt/model/size — out of the tool's stdout into structured fields so
-the image renders deterministically, without relying on the model echoing the URL
-into prose. These cases cover the absolute-URL, relative-URL, no-URL, and
-non-success-exit paths.
-"""
-from src.tool_execution import _promote_image_fields
+"""Unit tests for `_promote_image_fields` and duplicate-image markdown stripping."""
+from src.tool_execution import (
+    _promote_image_fields,
+    strip_duplicate_generated_image_markdown,
+    format_tool_result,
+)
 
 
 def _result(stdout, exit_code=0):
@@ -55,3 +50,37 @@ def test_nonzero_exit_not_promoted():
     r = _result("https://host/api/generated-image/zzz.png", exit_code=1)
     _promote_image_fields(r)
     assert "image_url" not in r
+
+
+def test_strip_duplicate_markdown_image():
+    """Markdown embeds for already-delivered URLs are removed from prose."""
+  tool_events = [{"image_url": "/api/generated-image/abc123.png"}]
+  text = (
+      "Here is your image:\n\n"
+      "![Generated Image](/api/generated-image/abc123.png)\n\n"
+      "Hope you like it."
+  )
+  assert strip_duplicate_generated_image_markdown(text, tool_events) == (
+      "Here is your image:\n\n\n\nHope you like it."
+  )
+
+
+def test_strip_leaves_unrelated_markdown():
+    """Images not in tool_events are left intact."""
+    text = "![other](/api/generated-image/other.png)"
+    assert strip_duplicate_generated_image_markdown(text, []) == text
+
+
+def test_format_tool_result_image_guidance():
+    """format_tool_result tells the model not to echo image markdown."""
+    r = _result(
+        "Generated image for: a cat\n"
+        "Direct link: /api/generated-image/cat.png\n"
+        "model: flux\n"
+        "size: 1024x1024",
+    )
+    _promote_image_fields(r)
+    out = format_tool_result("generate_image", r)
+    assert "shown automatically in chat" in out
+    assert "Direct link:" not in out
+    assert "do not embed" in out.lower() or "Do not embed" in out

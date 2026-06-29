@@ -1278,6 +1278,45 @@ export function buildModelDownloadBubble(modelUrl, prompt, format, previewUrls) 
   return wrap;
 }
 
+const _GENERATED_IMAGE_PATH_RE = /\/api\/generated-image\/[A-Za-z0-9._-]+/;
+const _GENERATED_IMAGE_MD_RE = /!\[[^\]]*\]\((?:https?:\/\/[^\s)\]]+)?\/api\/generated-image\/[A-Za-z0-9._-]+\)\s*/gi;
+
+/** Normalize a generated-image URL to its /api/generated-image/... path. */
+export function normalizeGeneratedImageUrl(url) {
+  if (!url) return '';
+  const m = String(url).match(_GENERATED_IMAGE_PATH_RE);
+  return m ? m[0] : String(url).trim();
+}
+
+/** Collect image paths already shown via structured tool_events.image_url. */
+export function deliveredImageUrlsFromToolEvents(toolEvents) {
+  const urls = new Set();
+  for (const ev of toolEvents || []) {
+    if (ev?.image_url) urls.add(normalizeGeneratedImageUrl(ev.image_url));
+  }
+  return urls;
+}
+
+/** Strip markdown embeds for images already delivered via tool_events. */
+export function stripDuplicateGeneratedImageMarkdown(text, deliveredUrls) {
+  if (!text || !deliveredUrls?.size) return text || '';
+  let out = text.replace(_GENERATED_IMAGE_MD_RE, (match) => {
+    const path = normalizeGeneratedImageUrl(match);
+    for (const d of deliveredUrls) {
+      if (path === d || match.includes(d)) return '';
+    }
+    return match;
+  });
+  for (const url of deliveredUrls) {
+    const esc = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(
+      new RegExp(`^\\s*Direct link:\\s*(?:https?:\\/\\/[^\\s]+)?${esc}\\s*\\n?`, 'gim'),
+      ''
+    );
+  }
+  return out;
+}
+
 /**
  * Build a generated-image bubble element.
  */
@@ -2267,6 +2306,7 @@ export function addMessage(role, content, modelName, metadata) {
     if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {
       const roundTexts = metadata.round_texts || [];
       const toolEvents = metadata.tool_events;
+      const deliveredImageUrls = deliveredImageUrlsFromToolEvents(toolEvents);
       let pendingAskUser = null;
       let lastWrap = null;
       let firstMsgAi = null;
@@ -2283,7 +2323,7 @@ export function addMessage(role, content, modelName, metadata) {
 
       for (let r = 0; r < maxRound; r++) {
         const roundNum = r + 1;
-        const txt = (roundTexts[r] || '').trim();
+        const txt = stripDuplicateGeneratedImageMarkdown((roundTexts[r] || '').trim(), deliveredImageUrls);
 
         if (txt) {
           const wrap = document.createElement('div');
@@ -2758,6 +2798,9 @@ const chatRenderer = {
   buildFindingsBox,
   appendReportButton,
   buildImageBubble,
+  normalizeGeneratedImageUrl,
+  deliveredImageUrlsFromToolEvents,
+  stripDuplicateGeneratedImageMarkdown,
   buildModelDownloadBubble,
   hideWelcomeScreen,
   showWelcomeScreen,

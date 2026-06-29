@@ -24,6 +24,7 @@ from src.tool_policy import GUIDE_ONLY_DIRECTIVE, ToolPolicy
 from src.repetition_detector import RepetitionCollapseDetector
 from src.constants import UI_METADATA_OUTPUT_CHARS
 from src.tool_utils import _truncate, get_mcp_manager
+from src.tool_execution import strip_duplicate_generated_image_markdown
 from src.agent_tools import (
     parse_tool_blocks,
     strip_tool_blocks,
@@ -3013,6 +3014,7 @@ async def stream_agent_loop(
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
+        cleaned_round = strip_duplicate_generated_image_markdown(cleaned_round, tool_events)
         round_texts.append(cleaned_round)
 
         if not tool_blocks:
@@ -3628,6 +3630,10 @@ async def stream_agent_loop(
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
+    for i, rt in enumerate(round_texts):
+        round_texts[i] = strip_duplicate_generated_image_markdown(rt, tool_events)
+    full_response = strip_duplicate_generated_image_markdown(full_response, tool_events)
+
     full_response, _fallback_chunk = _empty_response_fallback(
         full_response, round_reasoning, tool_events
     )

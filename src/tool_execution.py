@@ -465,6 +465,68 @@ def _promote_image_fields(result: Dict) -> None:
             result[field] = fm.group(1).strip()
 
 
+_GENERATED_IMAGE_PATH_RE = re.compile(r'/api/generated-image/[A-Za-z0-9._-]+')
+_GENERATED_IMAGE_MD_RE = re.compile(
+    r'!\[[^\]]*\]\((?:https?://[^\s)\]]+)?/api/generated-image/[A-Za-z0-9._-]+\)\s*',
+    re.IGNORECASE,
+)
+
+
+def _generated_image_path(url: str) -> Optional[str]:
+    """Return the /api/generated-image/... path suffix from *url*, if any."""
+    m = _GENERATED_IMAGE_PATH_RE.search(url or "")
+    return m.group(0) if m else None
+
+
+def delivered_image_paths(tool_events: list) -> set[str]:
+    """Collect normalized generated-image paths already shown via tool_events."""
+    paths: set[str] = set()
+    for ev in tool_events or []:
+        if isinstance(ev, dict) and ev.get("image_url"):
+            p = _generated_image_path(ev["image_url"])
+            if p:
+                paths.add(p)
+    return paths
+
+
+def strip_duplicate_generated_image_markdown(text: str, tool_events: list) -> str:
+    """Remove markdown image embeds for URLs already delivered via tool_events.
+
+    The UI renders ``image_url`` from tool results as a dedicated bubble; when
+    the model also echoes ``![...](/api/generated-image/...)`` in prose the chat
+    shows the same image twice (and the markdown copy is often clipped).
+    """
+    if not text or not tool_events:
+        return text
+    delivered = delivered_image_paths(tool_events)
+    if not delivered:
+        return text
+
+    def _strip_md(match: re.Match) -> str:
+        path = _generated_image_path(match.group(0))
+        return "" if path and path in delivered else match.group(0)
+
+    text = _GENERATED_IMAGE_MD_RE.sub(_strip_md, text)
+    for path in delivered:
+        text = re.sub(
+            rf'^\s*Direct link:\s*(?:https?://[^\s]+)?{re.escape(path)}\s*\n?',
+            "",
+            text,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+    return text
+
+
+def _strip_image_stdout_lines(stdout: str) -> str:
+    """Drop the Direct link line from generate_image stdout shown to the model."""
+    lines = []
+    for line in (stdout or "").splitlines():
+        if re.match(r'^Direct link:\s*', line.strip(), re.IGNORECASE):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _promote_model_fields(result: Dict) -> None:
     """Lift STL/model download URL and preview images from OpenSCAD MCP stdout."""
     if not isinstance(result, dict) or result.get("exit_code") != 0:
@@ -987,6 +1049,7 @@ _FORMATTER_HANDLED_KEYS = {
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
     "error", "output",
+    "image_url", "image_prompt", "image_model", "image_size", "image_quality", "image_id",
 }
 
 
@@ -994,10 +1057,19 @@ def format_tool_result(description: str, result: Dict) -> str:
     """Format a tool result into text for feeding back to the LLM."""
     parts = [f"### {description}"]
 
+    if result.get("image_url"):
+        parts.append(
+            "**Image:** shown automatically in chat — do not embed "
+            "`![...](...)` markdown or repeat the image URL in your reply."
+        )
+
     if "stdout" in result:
-        if result["stdout"]:
-            parts.append(f"**stdout:**\n```\n{result['stdout']}\n```")
-        if result["stderr"]:
+        stdout = result["stdout"]
+        if result.get("image_url") and stdout:
+            stdout = _strip_image_stdout_lines(stdout)
+        if stdout:
+            parts.append(f"**stdout:**\n```\n{stdout}\n```")
+        if result.get("stderr"):
             parts.append(f"**stderr:**\n```\n{result['stderr']}\n```")
         parts.append(f"**exit_code:** {result.get('exit_code', 'unknown')}")
     elif "output" in result:

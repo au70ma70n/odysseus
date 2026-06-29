@@ -978,7 +978,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_image",
-            "description": "Edit a gallery image: upscale, remove background, inpaint, or harmonize.",
+            "description": "Edit a saved gallery image: upscale, remove background, inpaint (masked area), or harmonize. Requires gallery image_id. For ComfyUI FLUX instruction edits on a chat-generated image, use the ComfyUI MCP edit_image tool instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
