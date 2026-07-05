@@ -99,7 +99,7 @@ function _formatSize(bytes) {
 // Build the `.attach-cards` element for a message's attachment list. Shared by
 // addMessage and updateMessageAttachments so a live (optimistic) user bubble
 // can be re-rendered with real upload ids once the upload resolves.
-function buildAttachCards(attachments) {
+export function buildAttachCards(attachments) {
   const attachWrap = document.createElement('div');
   attachWrap.className = 'attach-cards';
   for (const att of attachments) {
@@ -443,6 +443,23 @@ const TOOL_CALL_RE = /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi;
 let EXEC_FENCE_RE = null;
 const EXEC_FENCE_NON_TOOL = new Set(['bash', 'python']);
 
+function escapeRegex(source) {
+  return String(source).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripExecutedFence(match, tag, inline, body) {
+  const inlineArgs = (inline || '').trim();
+  if (!inlineArgs) return '';
+  const bodyText = (body || '').trim();
+  const content = bodyText ? `${inlineArgs}\n${bodyText}` : inlineArgs;
+  try {
+    JSON.parse(content);
+  } catch {
+    return match;
+  }
+  return '';
+}
+
 async function loadExecFenceRegex() {
   try {
     const res = await fetch('/api/tools', { credentials: 'same-origin' });
@@ -452,7 +469,10 @@ async function loadExecFenceRegex() {
       .filter((id) => id && !EXEC_FENCE_NON_TOOL.has(id));
     if (tags.length) {
       EXEC_FENCE_RE = new RegExp(
-        '```(?:' + tags.join('|') + ')\\s*\\n[\\s\\S]*?```', 'gi'
+        '```(' + tags.map(escapeRegex).join('|') + ')(?![\\w-])' +
+        '[ \\t]*([\\[{][^\\n]*?)?[ \\t]*(?=\\r?\\n|```)' +
+        '\\r?\\n?([\\s\\S]*?)```',
+        'gi'
       );
     }
   } catch (err) {
@@ -907,7 +927,7 @@ export function roleTimestamp(when) {
  */
 export function stripToolBlocks(text) {
   let cleaned = text.replace(TOOL_CALL_RE, '');
-  if (EXEC_FENCE_RE) cleaned = cleaned.replace(EXEC_FENCE_RE, '');
+  if (EXEC_FENCE_RE) cleaned = cleaned.replace(EXEC_FENCE_RE, stripExecutedFence);
   cleaned = cleaned.replace(DSML_TOOL_RE, '');
   cleaned = cleaned.replace(DSML_STRAY_RE, '');
   cleaned = cleaned.replace(XML_TOOL_CALL_RE, '');
@@ -1122,6 +1142,17 @@ document.addEventListener('click', function(e) {
     el = el.parentElement || el.parentNode;
   }
 }, true);
+
+function resolveDocumentPlaceholderLinks(text, metadata) {
+  if (!text || !metadata || !Array.isArray(metadata.tool_events)) return text;
+  const docEvents = metadata.tool_events.filter(ev => ev && ev.doc_id);
+  if (!docEvents.length) return text;
+  return String(text).replace(/#document-(\d+)\b/g, (match, num) => {
+    const idx = Number(num) - 1;
+    const ev = Number.isInteger(idx) && idx >= 0 ? docEvents[idx] : null;
+    return ev && ev.doc_id ? `#document-${ev.doc_id}` : match;
+  });
+}
 
 // Jump-to-entity anchors — the agent emits links like
 //   [New Chat](#session-89effa28)
@@ -1864,8 +1895,9 @@ export function createUserMsgFooter(msgElement) {
  * Display performance metrics for a message.
  */
 export function displayMetrics(messageElement, metrics) {
-  const existingMetrics = messageElement.querySelector('.response-metrics');
-  if (existingMetrics) existingMetrics.remove();
+  messageElement
+    .querySelectorAll('.response-metrics, .metrics-divider, .ctx-divider, .ctx-ring')
+    .forEach((el) => el.remove());
 
   const metricsContainer = document.createElement('span');
   metricsContainer.className = 'response-metrics';
@@ -1880,7 +1912,7 @@ export function displayMetrics(messageElement, metrics) {
   const cost = _billableCost(model, inputTokens, outputTokens);
 
   // Nothing useful to show — bail out (only if ALL metrics are missing)
-  if (!responseTime && !outputTokens && tps == null && !ctxPct) return;
+  if (!responseTime && !inputTokens && !outputTokens && tps == null && !ctxPct) return;
 
   // Accumulate session cost (only on fresh metrics, not history reload)
   if (!metrics._fromHistory) {
@@ -1903,14 +1935,17 @@ export function displayMetrics(messageElement, metrics) {
       ? `${outputTokens} tok · ${costStr0}`
       : outputTokens
         ? `${outputTokens} tok · ${responseTime != null ? responseTime + 's' : ''}`
-        : responseTime != null
-          ? `${responseTime}s`
-          : '';
+        : inputTokens
+          ? `${inputTokens} in${responseTime != null ? ' · ' + responseTime + 's' : ''}`
+          : responseTime != null
+            ? `${responseTime}s`
+            : '';
   if (!metricsLabel) return;
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
   metricsContainer.title = 'Click for details';
   const metricsDivider = document.createElement('span');
+  metricsDivider.className = 'metrics-divider';
   metricsDivider.textContent = ' | ';
   metricsDivider.style.color = 'var(--color-muted-alt)';
   metricsDivider.style.pointerEvents = 'none';
@@ -2123,6 +2158,13 @@ export function displayMetrics(messageElement, metrics) {
   }
 
   let footer = messageElement.querySelector('.msg-footer');
+  if (!footer) {
+    footer = createMsgFooter(messageElement);
+    if (messageElement.classList?.contains('agent-thread')) {
+      footer.classList.add('agent-thread-footer');
+    }
+    messageElement.appendChild(footer);
+  }
   if (footer) {
     const actions = footer.querySelector('.msg-actions');
     if (actions) {
@@ -2323,7 +2365,7 @@ export function addMessage(role, content, modelName, metadata) {
 
       for (let r = 0; r < maxRound; r++) {
         const roundNum = r + 1;
-        const txt = stripDuplicateGeneratedImageMarkdown((roundTexts[r] || '').trim(), deliveredImageUrls);
+        const txt = resolveDocumentPlaceholderLinks(stripDuplicateGeneratedImageMarkdown((roundTexts[r] || '').trim(), deliveredImageUrls), metadata);
 
         if (txt) {
           const wrap = document.createElement('div');
@@ -2516,6 +2558,9 @@ export function addMessage(role, content, modelName, metadata) {
     b.className = 'body';
 
     let text = markdownModule.squashOutsideCode(stripToolBlocks(textRaw || ''));
+    if (role === 'assistant') {
+      text = resolveDocumentPlaceholderLinks(text, metadata);
+    }
 
     // For user messages, pull out vision-model image descriptions ([Image: name]\n
     // <multi-line desc>) into a collapsible "image description" section. Done for
@@ -2807,6 +2852,7 @@ const chatRenderer = {
   createMsgFooter,
   displayMetrics,
   addMessage,
+  buildAttachCards,
   updateMessageAttachments,
 };
 
